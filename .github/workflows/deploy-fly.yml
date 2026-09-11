@@ -1,0 +1,37 @@
+name: Deploy to Fly.io
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: Globally unique Fly app name (reuse it for updates)
+        required: true
+        type: string
+      region:
+        description: Fly region (keep unchanged on updates)
+        required: true
+        default: ams
+        type: string
+      org:
+        description: Fly organization slug
+        required: true
+        default: personal
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: fly-${{ inputs.app }}
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: fly-production
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      FLY_APP: ${{ inputs.app }}
+      FLY_REGION: ${{ inputs.region }}
+      FLY_ORG: ${{ inputs.org }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+      - name: Provision and deploy
+        run: bash scripts/deploy-fly.sh

@@ -2,6 +2,10 @@
 
 A small self-hosted admin interface and MCP gateway. Enter a Composio project API key, fetch the tool catalog, disable tools, and issue restricted sessions to authenticated members.
 
+## Deploy to Fly.io
+
+Use **Actions → Deploy to Fly.io → Run workflow** after configuring your Fly account and the `FLY_API_TOKEN` secret. See the [deployment guide](docs/fly-deployment.md) for setup, persistent storage, admin login, costs, and updates. This provisions one machine and one volume; it does not change the admin authentication model.
+
 ## Run
 
 Requires Node.js 22.19 or newer.
