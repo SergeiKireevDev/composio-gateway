@@ -1,4 +1,8 @@
-# App name and region are supplied by the deployment workflow.
+# Fly's browser launcher or CLI chooses the app name and region.
+# Deliberately omit app-specific values so other users can launch their own copy.
+[deploy]
+  strategy = "immediate"
+
 [build]
   dockerfile = "Dockerfile.fly"
 
@@ -10,6 +14,7 @@
 [[mounts]]
   source = "gateway_data"
   destination = "/data"
+  initial_size = "1gb"
 
 [http_service]
   internal_port = 8788
