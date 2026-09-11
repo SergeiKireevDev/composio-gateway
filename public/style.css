@@ -471,11 +471,6 @@ input::placeholder {
   padding: 27px;
   margin-bottom: 22px;
 }
-.two-column {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 22px;
-}
 form {
   display: grid;
   gap: 12px;
@@ -669,10 +664,6 @@ code {
   }
   .toggle span:first-child {
     display: none;
-  }
-  .two-column {
-    grid-template-columns: 1fr;
-    gap: 0;
   }
   .save-bar {
     left: 12px;

@@ -20,11 +20,11 @@ function notify(message, error = false) {
     error ? 12000 : 5000,
   );
 }
-async function api(path, { method = "GET", body, credential = admin } = {}) {
+async function api(path, { method = "GET", body } = {}) {
   const res = await fetch(path, {
     method,
     headers: {
-      Authorization: `Bearer ${credential}`,
+      Authorization: `Bearer ${admin}`,
       ...(body ? { "Content-Type": "application/json" } : {}),
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -288,7 +288,6 @@ $("logout").addEventListener("click", () => {
   $("login").hidden = false;
   $("credential-box").hidden = true;
   $("credential-output").textContent = "";
-  $("member-token").value = "";
   $("api-key").value = "";
   catalog = [];
   catalogMembers = [];
@@ -385,22 +384,6 @@ $("member-form").addEventListener(
     await members();
     await refreshStatus();
     await loadCatalog();
-  }),
-);
-$("session-form").addEventListener(
-  "submit",
-  handle(async () => {
-    const r = await api("/api/sessions", {
-      method: "POST",
-      body: {},
-      credential: $("member-token").value.trim(),
-    }).catch(async (error) => {
-      if (error.status === 409) await refreshStatus();
-      throw error;
-    });
-    if (r.mcp.url.startsWith("/")) r.mcp.url = location.origin + r.mcp.url;
-    showSecret("Session connection for Oyster", r);
-    $("member-token").value = "";
   }),
 );
 $("copy-credential").addEventListener(

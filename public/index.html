@@ -154,51 +154,28 @@
               </p>
             </div>
           </div>
-          <div class="two-column">
-            <div class="card padded">
-              <h2>Add a member</h2>
-              <form id="member-form">
-                <label for="member-name">Member name</label
-                ><input
-                  id="member-name"
-                  required
-                  maxlength="200"
-                  placeholder="Personal Oyster"
-                /><label for="user-id">Composio user ID</label
-                ><input
-                  id="user-id"
-                  required
-                  maxlength="200"
-                  placeholder="user_alex"
-                />
-                <p class="hint">
-                  Use the ID associated with this person's Composio connections.
-                  Members cannot change it when requesting a session.
-                </p>
-                <button class="primary">Create member credential ↗</button>
-              </form>
-            </div>
-            <div class="card padded">
-              <h2>Request a session</h2>
-              <p>
-                Use a member credential to receive an expiring MCP token for
-                Oyster.
-              </p>
-              <form id="session-form">
-                <label for="member-token">Member credential</label
-                ><input
-                  id="member-token"
-                  required
-                  type="password"
-                  autocomplete="off"
-                /><button class="secondary">Issue test session</button>
-              </form>
+          <div class="card padded">
+            <h2>Add a member</h2>
+            <form id="member-form">
+              <label for="member-name">Member name</label
+              ><input
+                id="member-name"
+                required
+                maxlength="200"
+                placeholder="Personal Oyster"
+              /><label for="user-id">Composio user ID</label
+              ><input
+                id="user-id"
+                required
+                maxlength="200"
+                placeholder="user_alex"
+              />
               <p class="hint">
-                API: <code>POST /api/sessions</code> with
-                <code>Authorization: Bearer &lt;member credential&gt;</code> and
-                an empty JSON body.
+                Use the ID associated with this person's Composio connections.
+                Members cannot change it when requesting a session.
               </p>
-            </div>
+              <button class="primary">Create member credential ↗</button>
+            </form>
           </div>
           <div id="credential-box" class="card padded secret-box" hidden>
             <h2 id="credential-title">Copy your credential</h2>
@@ -229,9 +206,9 @@
               setup, or use the form below. Scans fetch only connected apps.
             </p>
             <p id="key-managed" class="notice" hidden>
-              Configured by COMPOSIO_API_TOKEN. To change the Composio key, update
-              that deployment variable and redeploy. The key is never displayed
-              here.
+              Configured by COMPOSIO_API_TOKEN. To change the Composio key,
+              update that deployment variable and redeploy. The key is never
+              displayed here.
             </p>
             <form id="key-form">
               <label for="api-key">Composio API key</label

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGateway } from "../server.mjs";
 
-test("browser: connected catalogs, member filters, shared policy, sessions, mobile layout", async (t) => {
+test("browser: connected catalogs, member filters, shared policy, session API, mobile layout", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "gateway-browser-"));
   const calls = [],
     requests = [];
@@ -119,14 +119,22 @@ test("browser: connected catalogs, member filters, shared policy, sessions, mobi
   await expect(page.locator("#disabled-count")).toHaveText("1");
 
   await page.getByRole("button", { name: "Members & sessions" }).click();
-  await page.getByLabel("Member credential", { exact: true }).fill(credential);
-  await page.getByRole("button", { name: "Issue test session" }).click();
-  await expect(page.locator("#credential-title")).toHaveText(
-    "Session connection for Oyster",
+  await expect(
+    page.getByRole("heading", { name: "Request a session" }),
+  ).toHaveCount(0);
+  await expect(page.locator("#session-form, #member-token")).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Add a member" }),
+  ).toBeVisible();
+  const response = await page.request.post(
+    new URL("/api/sessions", page.url()).href,
+    {
+      headers: { Authorization: `Bearer ${credential}` },
+      data: {},
+    },
   );
-  const session = JSON.parse(
-    await page.locator("#credential-output").textContent(),
-  );
+  assert.equal(response.status(), 201);
+  const session = await response.json();
   assert.match(session.mcp.headers.Authorization, /^Bearer /);
   assert.equal(JSON.stringify(session).includes("browser-secret-key"), false);
   assert.equal(calls[0].userId, "user_test");
@@ -148,5 +156,13 @@ test("browser: connected catalogs, member filters, shared policy, sessions, mobi
     true,
   );
   await expect(page.getByLabel("Filter by member")).toBeVisible();
+  await page.getByRole("button", { name: "Members & sessions" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Add a member" }),
+  ).toBeVisible();
+  await expect(page.locator("#session-form, #member-token")).toHaveCount(0);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.locator("#logout").click();
+  await expect(page.locator("#login")).toBeVisible();
   assert.deepEqual(errors, []);
 });
