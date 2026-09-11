@@ -49,11 +49,23 @@ export function policyConfig(catalog, disabled) {
 export function createGateway({
   dataDir = join(root, "data"),
   adminToken,
+  composioApiToken,
   provider = createProvider(),
   publicUrl,
   ttl = 3600,
   now = Date.now,
 } = {}) {
+  const environmentKey = composioApiToken !== undefined;
+  if (
+    environmentKey &&
+    (typeof composioApiToken !== "string" ||
+      !composioApiToken ||
+      composioApiToken.length > 1000 ||
+      /[^\x21-\x7e]/.test(composioApiToken))
+  )
+    throw new Error(
+      "COMPOSIO_API_TOKEN must be a nonempty Composio project API key without whitespace (maximum 1000 characters).",
+    );
   if (!Number.isInteger(ttl) || ttl < 60 || ttl > 86400)
     throw new Error("SESSION_TTL_SECONDS must be between 60 and 86400.");
   if (publicUrl) {
@@ -216,6 +228,27 @@ export function createGateway({
         }
       });
   }
+  if (environmentKey) {
+    try {
+      // An environment key is authoritative. Never use a previous project's
+      // catalog or sessions while the new key is being checked by a scan.
+      if (!store.get("apiKey") || key() !== composioApiToken) {
+        store.transaction(() => {
+          revoke();
+          store.set("apiKey", store.seal(composioApiToken));
+          store.set("catalog", []);
+          store.set("catalogConnections", {});
+          store.set("catalogScopeVersion", 0);
+          store.set("syncedAt", null);
+        });
+      }
+    } catch (error) {
+      db.close();
+      throw error;
+    } finally {
+      composioApiToken = undefined;
+    }
+  }
   const send = (res, status, value) => {
     res.writeHead(status, { "Content-Type": "application/json" });
     res.end(JSON.stringify(value));
@@ -275,6 +308,11 @@ export function createGateway({
         if (method === "GET" && path === "/api/admin/status") {
           send(res, 200, {
             configured: !!store.get("apiKey"),
+            keySource: environmentKey
+              ? "environment"
+              : store.get("apiKey")
+                ? "stored"
+                : null,
             scan,
             syncedAt: store.get("syncedAt"),
             total: catalog().length,
@@ -289,6 +327,11 @@ export function createGateway({
           return;
         }
         if (method === "POST" && path === "/api/admin/config") {
+          if (environmentKey)
+            throw fail(
+              409,
+              "Composio is managed by COMPOSIO_API_TOKEN. Change the deployment variable and redeploy to replace it.",
+            );
           const b = await body(req);
           startScan(textField(b.apiKey, "API key", 1000));
           send(res, 202, { scanning: true });
@@ -690,12 +733,14 @@ if (
   const app = createGateway({
     dataDir,
     adminToken: process.env.ADMIN_TOKEN,
+    composioApiToken: process.env.COMPOSIO_API_TOKEN,
     publicUrl: process.env.PUBLIC_URL,
     ttl: Number(process.env.SESSION_TTL_SECONDS || 3600),
   });
   // Best-effort removal from this process and subsequently spawned children.
   // This cannot erase Railway's variable store, OS snapshots, or old JS strings.
   delete process.env.ADMIN_TOKEN;
+  delete process.env.COMPOSIO_API_TOKEN;
   const port = Number(process.env.PORT || 8788),
     host = process.env.HOST || "127.0.0.1";
   app.server.listen(port, host, () => {
