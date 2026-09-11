@@ -7,19 +7,23 @@ On a fresh installation, set `ADMIN_TOKEN` to a long randomly generated bearer s
 At startup the gateway:
 
 1. Hashes the supplied `ADMIN_TOKEN` once using SHA-256.
-2. Atomically replaces `DATA_DIR/admin.token.sha256` with the hexadecimal hash, using owner-only file permissions (`0600`). The data directory is private (`0700`). No plaintext admin token is written.
-3. Removes a legacy `DATA_DIR/admin.token` only after the hash replacement succeeds.
+2. Writes the hexadecimal hash to an exclusively created temporary file with owner-only permissions (`0600`), flushes its contents, renames it to `DATA_DIR/admin.token.sha256`, and flushes the directory entry. The data directory is private (`0700`). No plaintext admin token is written.
+3. Removes a legacy `DATA_DIR/admin.token` only after the replacement and its disk synchronization succeed. A write, rename, or pre-deletion synchronization failure aborts startup and preserves the legacy file for recovery. The deletion itself is also synchronized; if that final synchronization fails, startup stops but the already-flushed hash remains available for recovery. If cleanup also fails, both errors are retained.
 4. Retains only the hash for request verification. The standalone server deletes `process.env.ADMIN_TOKEN` after successful initialization; this also prevents normal inheritance by future child processes.
 
 Each `/api/admin/*` request still sends `Authorization: Bearer <original-token>`. The gateway hashes that candidate and compares the fixed-length binary digests using `timingSafeEqual`. Supplying the stored hash instead of the original token does not authenticate. Missing and invalid credentials return 401 as before. Member and session credentials are unchanged.
 
 ## Restart, rotation, and migration
 
-- **Environment token present:** it is authoritative and replaces any previous hash. A blank or whitespace-only value fails startup rather than silently falling back. The token's actual bytes are hashed without trimming.
-- **Environment token absent:** load the existing hash. It must contain exactly 64 lowercase hexadecimal characters (a trailing newline is allowed).
+- **Environment token present:** it is authoritative and replaces any previous hash. Tokens must contain 1–1024 printable ASCII characters with no whitespace or control characters; use at least 32 random bytes in practice. Invalid values fail startup without echoing the secret, rather than silently falling back or trimming a token that HTTP headers could alter.
+- **Environment token absent:** load the existing hash without rewriting or replacing its inode, and enforce its private file permissions. It must contain exactly 64 lowercase hexadecimal characters with at most one optional LF or CRLF line ending. Additional whitespace and lines are rejected.
 - **No hash, but a legacy `admin.token` exists:** read it using the previous whitespace-trimming behavior, persist its hash, and remove the old file. The existing login still works. Copy your original token into a password manager before upgrading; hashes are not reversible.
 - **Neither credential source exists:** fail startup with instructions to set `ADMIN_TOKEN`. A new plaintext token is no longer automatically generated or printed.
 - **Corrupt hash:** fail closed; explicitly setting `ADMIN_TOKEN` repairs/replaces it. A leftover legacy file never overrides an existing hash.
+
+The hash persistence code is isolated in `admin-auth.mjs`, with no SQLite dependency. It returns an authentication function that keeps the binary digest private. Invalid credentials are detected before opening the database or creating encryption material.
+
+The supported deployment target is a single gateway process on a Linux filesystem that supports file and directory `fsync` (including the Docker image). Filesystem synchronization errors fail closed. Do not run multiple gateway processes against the same data directory or rotate credentials concurrently; this is not a distributed credential store.
 
 To rotate or recover access, set a new random `ADMIN_TOKEN` and restart/redeploy. Once startup succeeds, the old token stops authenticating. Removing the variable without restarting does not change the running process. On Railway, do not leave an old variable configured: it would restore the old token on the next deployment. A hash file requires persistent storage to survive replacement of the container.
 

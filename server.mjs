@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { openStore, token, hash, matchesTokenHash, loadAdminTokenHash } from "./store.mjs";
+import { openStore, token, hash } from "./store.mjs";
+import { createAdminAuthenticator } from "./admin-auth.mjs";
 import { createProvider } from "./composio.mjs";
 const root = fileURLToPath(new URL(".", import.meta.url));
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -69,17 +70,15 @@ export function createGateway({
         "PUBLIC_URL must be an HTTP(S) origin without a path, query or credentials.",
       );
   }
-  const store = openStore(dataDir),
-    { db } = store;
-  let adminTokenHash;
+  let authenticateAdmin;
   try {
-    adminTokenHash = loadAdminTokenHash(dataDir, adminToken);
-  } catch (error) {
-    db.close();
-    throw error;
+    authenticateAdmin = createAdminAuthenticator(dataDir, adminToken);
   } finally {
     adminToken = undefined;
   }
+  // Validate credentials before opening SQLite or creating an encryption key.
+  const store = openStore(dataDir),
+    { db } = store;
   let scan = { running: false, count: 0, error: null },
     mutations = Promise.resolve(),
     scanTask = Promise.resolve();
@@ -227,7 +226,7 @@ export function createGateway({
         return;
       }
       if (path.startsWith("/api/admin/")) {
-        if (!matchesTokenHash(bearer(req), adminTokenHash))
+        if (!authenticateAdmin(bearer(req)))
           throw fail(401, "Invalid admin token.");
         if (method === "GET" && path === "/api/admin/status") {
           const catalog = store.get("catalog", []);
