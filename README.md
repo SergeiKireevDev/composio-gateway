@@ -15,10 +15,10 @@ Open `http://127.0.0.1:8788` and enter the original `ADMIN_TOKEN` in the login f
 
 On upgrades, an existing `data/admin.token` is automatically hashed and removed; the same token still logs in. Save your existing token before upgrading, as it cannot be recovered from the hash afterward. A stored hash allows restarts without `ADMIN_TOKEN`; supplying it again replaces the stored hash. See [admin authentication](docs/admin-authentication.md) for Railway setup, rotation, and security limits.
 
-1. In **Connection**, enter your Composio project API key. The gateway automatically scans every catalog page and shows progress. A failed scan leaves the previous configuration intact.
-2. In **Tool permissions**, search or filter by app, disable individual tools or all filtered tools, then save. Initially all fetched tools are enabled. The saved policy is shared by all members.
-3. In **Members & sessions**, create a member using the Composio user ID associated with their app connections. Copy the member credential; it is only displayed once.
-4. Use that credential to request a session, or use the interface's **Issue test session** button. Copy the returned MCP URL and Authorization header into Oyster's MCP configuration.
+1. In **Connection**, enter your Composio project API key. The gateway fetches tools only for apps connected by active gateway members, never the entire Composio catalog. With no members or connected apps, the catalog stays empty and no tool-catalog requests are made.
+2. In **Members & sessions**, create a member using the Composio user ID associated with their app connections. Copy the member credential; it is only displayed once. Adding or reactivating a member automatically refreshes the connected-app catalog.
+3. In **Tool permissions**, filter by member to see their connected apps at the last sync, then search or filter by app and disable tools. Member selection only filters the view: the saved policy remains shared by all members. Initially newly discovered tools are enabled.
+4. Use the member credential to request a session, or use **Issue test session**. With no apps connected, the session allows connection management only. After connecting an app, click **Sync catalog**. If a session request discovers an app absent from the cache, it starts a scoped refresh and returns HTTP 409; retry after the refresh finishes. Copy the successful session's MCP URL and Authorization header into Oyster.
 
 App OAuth remains available through the session's Composio connection-management tools. This version does not include a separate Gmail/GitHub OAuth connection page. A member cannot change their Composio user ID or session policy through the session endpoint.
 
@@ -81,7 +81,11 @@ The gateway only proxies a fixed set of MCP methods to the server-created Compos
 
 Saving permissions, replacing the key after a successful scan, or syncing the catalog invalidates all gateway sessions and aborts active proxy requests. Revoking or rotating a member invalidates that member's sessions. Remote session deletion is attempted on revocation and expiry; local revocation remains effective if Composio is unavailable. An action already accepted by Composio cannot be undone by revoking its session.
 
-Catalog refresh enables newly discovered tools by default. Until refresh, new tools are absent from the explicit allowlist. Review the refreshed catalog before issuing new sessions if you need to vet new additions.
+Catalog refresh discovers ACTIVE connections separately for each active gateway member, deduplicates their app slugs, and paginates each app using Composio's `toolkit_slug` filter. It also filters responses locally. Apps connected only by unregistered or revoked users are not fetched. Revoking a member refreshes the remaining members' scope. A legacy full-catalog cache is hidden on upgrade until a scoped refresh succeeds.
+
+A failed connection lookup or catalog request leaves the last committed key and catalog intact, with an error shown in the interface. With no active members, a new key is stored but cannot be checked through connection discovery until a member is added. Scans are serialized with member, policy, and session mutations to prevent stale scope commits; those operations may wait for an in-progress scan. Successful automatic refreshes revoke existing sessions just like manual syncs.
+
+Catalog refresh enables newly discovered tools by default. Disabled-tool settings are retained when an app disconnects or leaves the active-member scope, so reconnecting does not reset its restrictions. Until refresh, new tools are absent from the explicit allowlist. Review the refreshed catalog before issuing new sessions if you need to vet new additions.
 
 ## Configuration and VPS deployment
 
@@ -131,7 +135,7 @@ For an existing Chromium installation, set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`
 | `GET /api/admin/status`              | Admin      | Connection and scan status; no secrets                      |
 | `POST /api/admin/config`             | Admin      | `{ "apiKey": "…" }`; starts catalog scan                    |
 | `POST /api/admin/refresh`            | Admin      | Rescan with stored key                                      |
-| `GET /api/admin/tools`               | Admin      | Cached catalog                                              |
+| `GET /api/admin/tools`               | Admin      | Scoped catalog and active members' last-synced app lists      |
 | `PUT /api/admin/policy`              | Admin      | `{ "disabled": ["TOOL_SLUG"] }`; revokes sessions           |
 | `GET /api/admin/members`             | Admin      | Member list; no credentials                                 |
 | `POST /api/admin/members`            | Admin      | `{ "name": "…", "userId": "…" }`; returns member token once |

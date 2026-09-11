@@ -68,14 +68,14 @@
             <div>
               <span class="eyebrow">CONTROL WHAT YOUR AGENTS CAN DO</span>
               <h1>Tool permissions</h1>
-              <p>Choose the tools available to every gateway member.</p>
+              <p>Manage a shared policy for your members’ connected apps.</p>
             </div>
             <button id="refresh" class="secondary">↻ Sync catalog</button>
           </div>
           <div class="stats">
             <article>
               <span>Catalog tools</span><strong id="total">0</strong
-              ><small>Fetched from Composio</small>
+              ><small>Connected apps only</small>
             </article>
             <article>
               <span>Enabled</span><strong id="enabled-count">0</strong
@@ -105,7 +105,9 @@
                 type="search"
                 placeholder="Search tools, slugs, or descriptions…"
                 aria-label="Search tools"
-              /><select id="toolkit" aria-label="Filter by app">
+              /><select id="catalog-member" aria-label="Filter by member">
+                <option value="">All active members</option></select
+              ><select id="toolkit" aria-label="Filter by app">
                 <option value="">All apps</option></select
               ><select id="filter" aria-label="Filter by permission">
                 <option value="all">All permissions</option>
@@ -223,8 +225,8 @@
           <div class="card padded settings">
             <h2>Project API key</h2>
             <p>
-              Saving starts a complete catalog scan. Your connection is updated
-              only after the scan succeeds.
+              Saving scans only apps connected by active members. Your
+              connection is updated only after the scan succeeds.
             </p>
             <form id="key-form">
               <label for="api-key">Composio API key</label

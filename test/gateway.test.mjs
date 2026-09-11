@@ -23,12 +23,18 @@ export async function fixture(t) {
   let clock = Date.now();
   const calls = { create: [], forward: [], remove: [] };
   const provider = {
-    async connectedToolkits() { return ["gmail", "github"]; },
-    async page(k, c) {
+    async connectedToolkits() {
+      return ["gmail", "github"];
+    },
+    async page(k, c, toolkit) {
       if (k === "invalid") throw Error("Invalid API key");
+      const scoped = items.filter((t) => t.toolkit.slug === toolkit);
       return c
-        ? { items: items.slice(1) }
-        : { items: items.slice(0, 1), next_cursor: "page2" };
+        ? { items: scoped.slice(1) }
+        : {
+            items: scoped.slice(0, 1),
+            ...(scoped.length > 1 ? { next_cursor: "page2" } : {}),
+          };
     },
     async create(k, userId, config) {
       calls.create.push({ k, userId, config });
@@ -70,6 +76,10 @@ export async function fixture(t) {
     return { status: res.status, data: await res.json() };
   }
   async function setup() {
+    await req("/api/admin/members", "POST", {
+      name: "Catalog member",
+      userId: "catalog-member",
+    });
     assert.equal(
       (await req("/api/admin/config", "POST", { apiKey: "secret-project-key" }))
         .status,
@@ -78,9 +88,12 @@ export async function fixture(t) {
     await app.waitForScan();
   }
   async function member(user = "alice") {
-    return (
-      await req("/api/admin/members", "POST", { name: user, userId: user })
-    ).data;
+    const response = await req("/api/admin/members", "POST", {
+      name: user,
+      userId: user,
+    });
+    await app.waitForScan();
+    return response.data;
   }
   t.after(async () => {
     await app.close();
@@ -101,16 +114,34 @@ export async function fixture(t) {
 test("sessions restrict tools to each member's active services and fail closed", async (t) => {
   const f = await fixture(t);
   await f.setup();
-  f.provider.connectedToolkits = async (key, user) => user === "alice" ? ["gmail"] : ["github"];
-  for (const [user, toolkit] of [["alice", "gmail"], ["bob", "github"]]) {
+  f.provider.connectedToolkits = async (key, user) =>
+    user === "alice" ? ["gmail"] : ["github"];
+  for (const [user, toolkit] of [
+    ["alice", "gmail"],
+    ["bob", "github"],
+  ]) {
     const m = await f.member(user);
     const session = await f.req("/api/sessions", "POST", {}, m.token);
     assert.equal(session.status, 201);
     assert.deepEqual(f.calls.create.at(-1).config.toolkits, [toolkit]);
-    const denied = user === "alice" ? "GITHUB_DELETE_REPO" : "GMAIL_FETCH_EMAILS";
-    assert.equal((await f.req("/mcp", "POST", {
-      jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: denied },
-    }, session.data.token)).status, 403);
+    const denied =
+      user === "alice" ? "GITHUB_DELETE_REPO" : "GMAIL_FETCH_EMAILS";
+    assert.equal(
+      (
+        await f.req(
+          "/mcp",
+          "POST",
+          {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: { name: denied },
+          },
+          session.data.token,
+        )
+      ).status,
+      403,
+    );
   }
   const m = await f.member("empty");
   f.provider.connectedToolkits = async () => [];
@@ -118,34 +149,89 @@ test("sessions restrict tools to each member's active services and fail closed",
   assert.equal(onboarding.status, 201);
   assert.equal(onboarding.data.mode, "onboarding");
   assert.deepEqual(f.calls.create.at(-1).config.preload, { tools: [] });
-  for (const name of ["GMAIL_FETCH_EMAILS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS"]) {
-    assert.equal((await f.req("/mcp", "POST", {
-      jsonrpc: "2.0", id: 1, method: "tools/call", params: { name },
-    }, onboarding.data.token)).status, 403);
+  for (const name of [
+    "GMAIL_FETCH_EMAILS",
+    "COMPOSIO_MULTI_EXECUTE_TOOL",
+    "COMPOSIO_SEARCH_TOOLS",
+    "COMPOSIO_GET_TOOL_SCHEMAS",
+  ]) {
+    assert.equal(
+      (
+        await f.req(
+          "/mcp",
+          "POST",
+          {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: { name },
+          },
+          onboarding.data.token,
+        )
+      ).status,
+      403,
+    );
   }
-  assert.equal((await f.req("/mcp", "POST", {
-    jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "COMPOSIO_MANAGE_CONNECTIONS" },
-  }, onboarding.data.token)).status, 200);
+  assert.equal(
+    (
+      await f.req(
+        "/mcp",
+        "POST",
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: { name: "COMPOSIO_MANAGE_CONNECTIONS" },
+        },
+        onboarding.data.token,
+      )
+    ).status,
+    200,
+  );
   for (const sse of [false, true]) {
     f.provider.forward = async (up, body) => {
-      const message = { jsonrpc: "2.0", id: body.id, result: { tools: [
-        { name: "COMPOSIO_MANAGE_CONNECTIONS", inputSchema: { type: "object" } },
-        { name: "COMPOSIO_MULTI_EXECUTE_TOOL" }, { name: "GMAIL_FETCH_EMAILS" },
-      ] } };
-      return sse ? new Response(`data: ${JSON.stringify(message)}\n\n`, {
-        headers: { "content-type": "text/event-stream" },
-      }) : Response.json(message);
+      const message = {
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          tools: [
+            {
+              name: "COMPOSIO_MANAGE_CONNECTIONS",
+              inputSchema: { type: "object" },
+            },
+            { name: "COMPOSIO_MULTI_EXECUTE_TOOL" },
+            { name: "GMAIL_FETCH_EMAILS" },
+          ],
+        },
+      };
+      return sse
+        ? new Response(`data: ${JSON.stringify(message)}\n\n`, {
+            headers: { "content-type": "text/event-stream" },
+          })
+        : Response.json(message);
     };
-    const listed = await f.req("/mcp", "POST", {
-      jsonrpc: "2.0", id: 3, method: "tools/list",
-    }, onboarding.data.token);
-    assert.deepEqual(listed.data.result.tools.map(t => t.name), ["COMPOSIO_MANAGE_CONNECTIONS"]);
+    const listed = await f.req(
+      "/mcp",
+      "POST",
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/list",
+      },
+      onboarding.data.token,
+    );
+    assert.deepEqual(
+      listed.data.result.tools.map((t) => t.name),
+      ["COMPOSIO_MANAGE_CONNECTIONS"],
+    );
   }
   f.provider.connectedToolkits = async () => ["gmail"];
   const connected = await f.req("/api/sessions", "POST", {}, m.token);
   assert.equal(connected.data.mode, "connected");
   assert.deepEqual(f.calls.create.at(-1).config.toolkits, ["gmail"]);
-  f.provider.connectedToolkits = async () => { throw Error("unavailable"); };
+  f.provider.connectedToolkits = async () => {
+    throw Error("unavailable");
+  };
   assert.equal((await f.req("/api/sessions", "POST", {}, m.token)).status, 502);
 });
 test("catalog paginates, encrypts secrets and preserves working config on failed scan", async (t) => {
@@ -380,9 +466,10 @@ test("catalog adapter uses v3.1 with pagination and a private key header", async
       return Response.json({ items: [], next_cursor: "next" });
     },
   });
-  await p.page("private-key", "cursor2");
+  await p.page("private-key", "cursor2", "github");
   assert.equal(seen.url.pathname, "/api/v3.1/tools");
   assert.equal(seen.url.searchParams.get("cursor"), "cursor2");
+  assert.equal(seen.url.searchParams.get("toolkit_slug"), "github");
   assert.equal(seen.options.headers["x-api-key"], "private-key");
   assert.equal(seen.options.redirect, "error");
 });
@@ -432,7 +519,9 @@ test("real SDK sends restricted session config and retains upstream key only ins
 test("encrypted connection, policy and credentials survive a server restart", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "gateway-restart-"));
   const provider = {
-    async connectedToolkits() { return ["gmail", "github"]; },
+    async connectedToolkits() {
+      return ["gmail", "github"];
+    },
     async page() {
       return { items };
     },
@@ -471,12 +560,12 @@ test("encrypted connection, policy and credentials survive a server restart", as
     await app.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  await req("/api/admin/config", "POST", { apiKey: "persisted-secret" });
-  await app.waitForScan();
-  await req("/api/admin/policy", "PUT", { disabled: ["GITHUB_DELETE_REPO"] });
   const m = await (
     await req("/api/admin/members", "POST", { name: "Alice", userId: "alice" })
   ).json();
+  await req("/api/admin/config", "POST", { apiKey: "persisted-secret" });
+  await app.waitForScan();
+  await req("/api/admin/policy", "PUT", { disabled: ["GITHUB_DELETE_REPO"] });
   const session = await (
     await req("/api/sessions", "POST", {}, m.token)
   ).json();
