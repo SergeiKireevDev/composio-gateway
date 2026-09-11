@@ -81,7 +81,8 @@ export function createGateway({
     { db } = store;
   let scan = { running: false, count: 0, error: null },
     mutations = Promise.resolve(),
-    scanTask = Promise.resolve();
+    scanTask = Promise.resolve(),
+    refreshRequested = false;
   const active = new Map();
   let closed = false;
   const serialize = (fn) => {
@@ -117,59 +118,102 @@ export function createGateway({
     }
     if (store.get("apiKey")) cleanup(rows, key());
   }
+  function catalogMembers() {
+    const connected = store.get("catalogConnections", {});
+    return db
+      .prepare(
+        "SELECT id,name,user_id FROM members WHERE active=1 ORDER BY name",
+      )
+      .all()
+      .map((m) => ({ ...m, toolkits: connected[m.id] || [] }));
+  }
+  function catalog() {
+    // Never serve a legacy, unscoped cache while the first scoped scan runs.
+    if (store.get("catalogScopeVersion") !== 1) return [];
+    const kits = new Set(catalogMembers().flatMap((m) => m.toolkits));
+    return store.get("catalog", []).filter((t) => kits.has(t.toolkit));
+  }
+  function refreshCatalog() {
+    if (closed || !store.get("apiKey")) return;
+    if (scan.running) refreshRequested = true;
+    else startScan(key());
+  }
   function startScan(apiKey) {
     if (scan.running) throw fail(409, "A catalog scan is already running.");
     scan = { running: true, count: 0, error: null };
-    scanTask = (async () => {
-      const all = new Map(),
-        seen = new Set();
-      let cursor;
-      do {
-        const p = await provider.page(apiKey, cursor);
-        for (const t of p.items) {
-          if (
-            typeof t.slug !== "string" ||
-            typeof t.toolkit?.slug !== "string" ||
-            !t.slug ||
-            !t.toolkit.slug
-          )
-            throw new Error(
-              "Catalog contains a tool without a slug or toolkit.",
-            );
-          all.set(t.slug, {
-            slug: t.slug,
-            toolkit: t.toolkit.slug,
-            name: t.name || t.slug,
-            description: String(t.description || "").slice(0, 2000),
-            tags: t.tags || [],
-          });
-        }
-        scan.count = all.size;
-        cursor = p.next_cursor;
-        if (cursor && seen.has(cursor))
-          throw new Error("Catalog pagination repeated a cursor.");
-        seen.add(cursor);
-      } while (cursor);
-      if (!all.size) throw new Error("Composio returned an empty catalog.");
-      await serialize(() =>
-        store.transaction(() => {
+    // Serialize scans with policy/member/session mutations so their scope
+    // cannot change between connection discovery and committing the catalog.
+    scanTask = serialize(async () => {
+      const connections = {},
+        kits = new Set(),
+        all = new Map();
+      for (const m of db
+        .prepare("SELECT id,user_id FROM members WHERE active=1")
+        .all()) {
+        if (closed) return;
+        connections[m.id] = [
+          ...new Set(await provider.connectedToolkits(apiKey, m.user_id)),
+        ].sort();
+        for (const kit of connections[m.id]) kits.add(kit);
+      }
+      for (const kit of [...kits].sort()) {
+        const seen = new Set();
+        let cursor,
+          count = 0;
+        do {
           if (closed) return;
-          revoke();
-          store.set("apiKey", store.seal(apiKey));
-          store.set("catalog", [...all.values()]);
-          store.set(
-            "disabled",
-            store.get("disabled", []).filter((slug) => all.has(slug)),
-          );
-          store.set("syncedAt", new Date(now()).toISOString());
-        }),
-      );
-    })()
+          const p = await provider.page(apiKey, cursor, kit);
+          for (const t of p.items) {
+            if (
+              typeof t.slug !== "string" ||
+              !t.slug ||
+              typeof t.toolkit?.slug !== "string" ||
+              !t.toolkit.slug
+            )
+              throw new Error(
+                "Catalog contains a tool without a slug or toolkit.",
+              );
+            // Enforce the scope locally too, even if an upstream ignores its filter.
+            if (t.toolkit.slug !== kit) continue;
+            count++;
+            all.set(t.slug, {
+              slug: t.slug,
+              toolkit: kit,
+              name: t.name || t.slug,
+              description: String(t.description || "").slice(0, 2000),
+              tags: t.tags || [],
+            });
+          }
+          scan.count = all.size;
+          cursor = p.next_cursor;
+          if (cursor && seen.has(cursor))
+            throw new Error("Catalog pagination repeated a cursor.");
+          seen.add(cursor);
+        } while (cursor);
+        if (!count)
+          throw new Error(`Composio returned an empty catalog for ${kit}.`);
+      }
+      store.transaction(() => {
+        if (closed) return;
+        revoke();
+        store.set("apiKey", store.seal(apiKey));
+        store.set("catalog", [...all.values()]);
+        store.set("catalogConnections", connections);
+        store.set("catalogScopeVersion", 1);
+        // Keep disabled tools when an app disconnects, so reconnecting cannot
+        // silently reset an administrator's saved restrictions.
+        store.set("syncedAt", new Date(now()).toISOString());
+      });
+    })
       .catch((e) => {
         scan.error = e.message;
       })
       .finally(() => {
         scan.running = false;
+        if (refreshRequested) {
+          refreshRequested = false;
+          refreshCatalog();
+        }
       });
   }
   const send = (res, status, value) => {
@@ -229,12 +273,11 @@ export function createGateway({
         if (!authenticateAdmin(bearer(req)))
           throw fail(401, "Invalid admin token.");
         if (method === "GET" && path === "/api/admin/status") {
-          const catalog = store.get("catalog", []);
           send(res, 200, {
             configured: !!store.get("apiKey"),
             scan,
             syncedAt: store.get("syncedAt"),
-            total: catalog.length,
+            total: catalog().length,
             disabled: store.get("disabled", []),
             epoch: store.get("epoch", 0),
             sessionTtl: ttl,
@@ -242,7 +285,7 @@ export function createGateway({
           return;
         }
         if (method === "GET" && path === "/api/admin/tools") {
-          send(res, 200, { items: store.get("catalog", []) });
+          send(res, 200, { items: catalog(), members: catalogMembers() });
           return;
         }
         if (method === "POST" && path === "/api/admin/config") {
@@ -260,9 +303,10 @@ export function createGateway({
           const b = await body(req);
           await serialize(() =>
             store.transaction(() => {
-              const known = new Set(
-                store.get("catalog", []).map((t) => t.slug),
-              );
+              const known = new Set([
+                ...catalog().map((t) => t.slug),
+                ...store.get("disabled", []),
+              ]);
               if (
                 !Array.isArray(b.disabled) ||
                 b.disabled.some((s) => typeof s !== "string" || !known.has(s))
@@ -299,6 +343,7 @@ export function createGateway({
             db.prepare(
               "INSERT INTO members(id,name,user_id,token_hash) VALUES(?,?,?,?)",
             ).run(id, name, userId, hash(credential));
+            refreshCatalog();
           });
           send(res, 201, { id, name, userId, token: credential });
           return;
@@ -309,12 +354,16 @@ export function createGateway({
         if (method === "POST" && match) {
           const credential = token();
           await serialize(() => {
-            if (!db.prepare("SELECT id FROM members WHERE id=?").get(match[1]))
-              throw fail(404, "Member not found.");
+            const previous = db
+              .prepare("SELECT active FROM members WHERE id=?")
+              .get(match[1]);
+            if (!previous) throw fail(404, "Member not found.");
             revoke(match[1]);
             db.prepare(
               "UPDATE members SET active=?,token_hash=? WHERE id=?",
             ).run(match[2] === "rotate" ? 1 : 0, hash(credential), match[1]);
+            if (previous.active !== (match[2] === "rotate" ? 1 : 0))
+              refreshCatalog();
           });
           send(
             res,
@@ -345,22 +394,37 @@ export function createGateway({
           const apiKey = key();
           let connected;
           try {
-            connected = new Set(await provider.connectedToolkits(apiKey, m.user_id));
+            connected = new Set(
+              await provider.connectedToolkits(apiKey, m.user_id),
+            );
           } catch {
-            throw fail(502, "Could not load this member's connected services from Composio.");
+            throw fail(
+              502,
+              "Could not load this member's connected services from Composio.",
+            );
+          }
+          const knownKits = new Set(catalog().map((t) => t.toolkit));
+          if ([...connected].some((kit) => !knownKits.has(kit))) {
+            refreshCatalog();
+            throw fail(
+              409,
+              "Connected apps changed. Catalog refresh started; retry after it completes.",
+            );
           }
           const onboarding = !connected.size;
           // Do not restrict connection discovery to already-connected toolkits.
           // Execution is denied locally for onboarding sessions.
-          const config = onboarding ? {
-            tools: {},
-            preload: { tools: [] },
-            sandbox: { enable: false, enableProxyExecution: false },
-            manageConnections: { enable: true },
-          } : policyConfig(
-              store.get("catalog", []).filter((t) => connected.has(t.toolkit)),
-              store.get("disabled", []),
-            );
+          const config = onboarding
+            ? {
+                tools: {},
+                preload: { tools: [] },
+                sandbox: { enable: false, enableProxyExecution: false },
+                manageConnections: { enable: true },
+              }
+            : policyConfig(
+                catalog().filter((t) => connected.has(t.toolkit)),
+                store.get("disabled", []),
+              );
           const current = db
             .prepare(
               "SELECT COUNT(*) AS n FROM sessions WHERE member_id=? AND expires>?",
@@ -374,7 +438,9 @@ export function createGateway({
           let up;
           try {
             up = await provider.create(apiKey, m.user_id, config);
-            up.allowedTools = Object.values(config.tools).flatMap((t) => t.enable);
+            up.allowedTools = Object.values(config.tools).flatMap(
+              (t) => t.enable,
+            );
             up.onboarding = onboarding;
           } catch {
             throw fail(
@@ -395,7 +461,12 @@ export function createGateway({
             token: credential,
             token_type: "Bearer",
             mode: onboarding ? "onboarding" : "connected",
-            ...(onboarding ? { next_step: "Connect services using COMPOSIO_MANAGE_CONNECTIONS, then request a new session." } : {}),
+            ...(onboarding
+              ? {
+                  next_step:
+                    "Connect services using COMPOSIO_MANAGE_CONNECTIONS, then request a new session.",
+                }
+              : {}),
             expires_at: new Date(expires).toISOString(),
             mcp: {
               type: "http",
@@ -438,11 +509,17 @@ export function createGateway({
         )
           throw fail(400, "Unsupported MCP method.");
         const upstream = store.unseal(s.upstream);
-        const connectionTools = ["COMPOSIO_MANAGE_CONNECTIONS", "COMPOSIO_WAIT_FOR_CONNECTIONS"];
+        const connectionTools = [
+          "COMPOSIO_MANAGE_CONNECTIONS",
+          "COMPOSIO_WAIT_FOR_CONNECTIONS",
+        ];
         if (b.method === "tools/call") {
           const name = b.params?.name;
           if (upstream.onboarding && !connectionTools.includes(name))
-            throw fail(403, "Onboarding sessions only allow connection management. Connect a service, then request a new session.");
+            throw fail(
+              403,
+              "Onboarding sessions only allow connection management. Connect a service, then request a new session.",
+            );
           const meta = [
             "COMPOSIO_SEARCH_TOOLS",
             "COMPOSIO_GET_TOOL_SCHEMAS",
@@ -450,11 +527,12 @@ export function createGateway({
             "COMPOSIO_MANAGE_CONNECTIONS",
             "COMPOSIO_WAIT_FOR_CONNECTIONS",
           ];
-          const sessionTools = new Set(store.unseal(s.upstream).allowedTools || []);
+          const sessionTools = new Set(
+            store.unseal(s.upstream).allowedTools || [],
+          );
           const denied = new Set(store.get("disabled", []));
           const allowed = new Set(
-            store
-              .get("catalog", [])
+            catalog()
               .filter((t) => !denied.has(t.slug) && sessionTools.has(t.slug))
               .map((t) => t.slug),
           );
@@ -501,10 +579,17 @@ export function createGateway({
           if (up.onboarding && b.method === "tools/list" && remote.ok) {
             const text = await remote.text();
             let message;
-            if ((remote.headers.get("content-type") || "").includes("text/event-stream")) {
+            if (
+              (remote.headers.get("content-type") || "").includes(
+                "text/event-stream",
+              )
+            ) {
               for (const event of text.split(/\r?\n\r?\n/)) {
-                const data = event.split(/\r?\n/).filter((line) => line.startsWith("data:"))
-                  .map((line) => line.slice(5).trimStart()).join("\n");
+                const data = event
+                  .split(/\r?\n/)
+                  .filter((line) => line.startsWith("data:"))
+                  .map((line) => line.slice(5).trimStart())
+                  .join("\n");
                 if (!data) continue;
                 const value = JSON.parse(data);
                 if (value.id === b.id) message = value;
@@ -514,10 +599,15 @@ export function createGateway({
               throw fail(502, "Could not load connection-management tools.");
             session(req);
             send(res, 200, {
-              jsonrpc: "2.0", id: b.id,
+              jsonrpc: "2.0",
+              id: b.id,
               result: {
-                tools: message.result.tools.filter((tool) => connectionTools.includes(tool.name)),
-                ...(message.result.nextCursor ? { nextCursor: message.result.nextCursor } : {}),
+                tools: message.result.tools.filter((tool) =>
+                  connectionTools.includes(tool.name),
+                ),
+                ...(message.result.nextCursor
+                  ? { nextCursor: message.result.nextCursor }
+                  : {}),
               },
             });
             return;
@@ -570,10 +660,14 @@ export function createGateway({
     if (rows.length && store.get("apiKey")) cleanup(rows, key());
   }, 30000);
   sweep.unref();
+  if (store.get("apiKey") && store.get("catalogScopeVersion") !== 1)
+    refreshCatalog();
   return {
     server,
     store,
-    waitForScan: () => scanTask,
+    waitForScan: async () => {
+      while (scan.running) await scanTask;
+    },
     async close() {
       closed = true;
       clearInterval(sweep);

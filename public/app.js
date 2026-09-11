@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 let admin = "",
   catalog = [],
+  catalogMembers = [],
   disabled = new Set(),
   saved = new Set(),
   page = 0,
@@ -29,7 +30,10 @@ async function api(path, { method = "GET", body, credential = admin } = {}) {
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Request failed");
+  if (!res.ok)
+    throw Object.assign(new Error(data.error || "Request failed"), {
+      status: res.status,
+    });
   return data;
 }
 function handle(fn) {
@@ -60,11 +64,36 @@ function dirty() {
     disabled.size !== saved.size || [...disabled].some((s) => !saved.has(s))
   );
 }
+function requireSavedPolicy() {
+  if (dirty())
+    throw new Error(
+      "Save or discard your permission changes before syncing or changing members.",
+    );
+}
+function memberCatalog() {
+  const selected = $("catalog-member").value;
+  if (!selected) return catalog;
+  const kits = new Set(
+    catalogMembers.find((m) => m.id === selected)?.toolkits || [],
+  );
+  return catalog.filter((t) => kits.has(t.toolkit));
+}
+function appOptions() {
+  const selected = $("toolkit").value;
+  $("toolkit").replaceChildren(new Option("All connected apps", ""));
+  for (const kit of [...new Set(memberCatalog().map((t) => t.toolkit))].sort())
+    $("toolkit").add(new Option(kit, kit));
+  $("toolkit").value = [...$("toolkit").options].some(
+    (o) => o.value === selected,
+  )
+    ? selected
+    : "";
+}
 function filtered() {
   const q = $("search").value.toLowerCase(),
     kit = $("toolkit").value,
     filter = $("filter").value;
-  return catalog.filter(
+  return memberCatalog().filter(
     (t) =>
       (!kit || t.toolkit === kit) &&
       (!q ||
@@ -75,10 +104,11 @@ function filtered() {
 function render() {
   const all = filtered();
   page = Math.max(0, Math.min(page, Math.ceil(all.length / size) - 1));
-  $("total").textContent = catalog.length.toLocaleString();
-  const n = catalog.filter((t) => disabled.has(t.slug)).length;
+  const scoped = memberCatalog();
+  $("total").textContent = scoped.length.toLocaleString();
+  const n = scoped.filter((t) => disabled.has(t.slug)).length;
   $("disabled-count").textContent = n.toLocaleString();
-  $("enabled-count").textContent = (catalog.length - n).toLocaleString();
+  $("enabled-count").textContent = (scoped.length - n).toLocaleString();
   $("result-count").textContent = all.length.toLocaleString();
   $("showing").textContent =
     `${all.length.toLocaleString()} tools match your filters`;
@@ -91,11 +121,15 @@ function render() {
   if (!all.length) {
     const e = document.createElement("div");
     e.className = "empty";
-    e.textContent = catalog.length
-      ? "No tools match these filters."
-      : status.scan?.running
-        ? "Fetching your Composio tool catalog…"
-        : "Connect your Composio API key in Connection to load the catalog.";
+    e.textContent = status.scan?.running
+      ? "Fetching tools for connected apps…"
+      : !status.configured
+        ? "Configure your Composio API key in Connection."
+        : !catalogMembers.length
+          ? "Add a member in Members & sessions to discover their connected apps."
+          : !scoped.length
+            ? "No connected-app tools at the last sync. Connect an app for this member, then Sync catalog."
+            : "No tools match these filters.";
     $("tools-list").append(e);
   }
   for (const t of all.slice(page * size, (page + 1) * size)) {
@@ -141,15 +175,19 @@ async function loadCatalog() {
   catalog = r.items;
   saved = new Set(status.disabled);
   disabled = new Set(saved);
-  const selected = $("toolkit").value;
-  $("toolkit").replaceChildren(new Option("All apps", ""));
-  for (const kit of [...new Set(catalog.map((t) => t.toolkit))].sort())
-    $("toolkit").add(new Option(kit, kit));
-  $("toolkit").value = selected;
+  catalogMembers = r.members;
+  const selected = $("catalog-member").value;
+  $("catalog-member").replaceChildren(new Option("All active members", ""));
+  for (const m of catalogMembers)
+    $("catalog-member").add(new Option(m.name, m.id));
+  $("catalog-member").value = catalogMembers.some((m) => m.id === selected)
+    ? selected
+    : "";
+  appOptions();
   render();
 }
 async function refreshStatus() {
-  const before = status.syncedAt;
+  const before = status.epoch;
   status = await api("/api/admin/status");
   $("connection").textContent = status.configured ? "Connected" : "Not set up";
   $("synced-at").textContent = status.syncedAt
@@ -159,9 +197,9 @@ async function refreshStatus() {
   $("refresh").disabled = !status.configured || status.scan.running;
   $("scan-status").hidden = !status.scan.running && !status.scan.error;
   $("scan-status").textContent = status.scan.running
-    ? `Scanning catalog · ${status.scan.count.toLocaleString()} tools fetched…`
+    ? `Scanning connected apps · ${status.scan.count.toLocaleString()} tools fetched…`
     : status.scan.error || "";
-  if (status.syncedAt !== before) await loadCatalog();
+  if (status.epoch !== before) await loadCatalog();
   if (status.scan.running) {
     clearTimeout(poll);
     poll = setTimeout(
@@ -197,11 +235,14 @@ async function members() {
       b.addEventListener(
         "click",
         handle(async () => {
+          requireSavedPolicy();
           const r = await api(`/api/admin/members/${m.id}/${action}`, {
             method: "POST",
           });
           if (r.token) showSecret("New member credential", r.token);
           await members();
+          await refreshStatus();
+          await loadCatalog();
           notify(
             action === "rotate"
               ? "Credential rotated; prior sessions revoked."
@@ -243,6 +284,7 @@ $("logout").addEventListener("click", () => {
   $("member-token").value = "";
   $("api-key").value = "";
   catalog = [];
+  catalogMembers = [];
   status = {};
 });
 for (const e of document.querySelectorAll(".nav"))
@@ -263,14 +305,16 @@ $("key-form").addEventListener(
 $("refresh").addEventListener(
   "click",
   handle(async () => {
-    if (dirty())
-      throw new Error(
-        "Save or discard your permission changes before syncing.",
-      );
+    requireSavedPolicy();
     await api("/api/admin/refresh", { method: "POST" });
     await refreshStatus();
   }),
 );
+$("catalog-member").addEventListener("change", () => {
+  page = 0;
+  appOptions();
+  render();
+});
 for (const id of ["search", "toolkit", "filter"])
   $(id).addEventListener(id === "search" ? "input" : "change", () => {
     page = 0;
@@ -324,6 +368,7 @@ $("save").addEventListener(
 $("member-form").addEventListener(
   "submit",
   handle(async () => {
+    requireSavedPolicy();
     const r = await api("/api/admin/members", {
       method: "POST",
       body: { name: $("member-name").value, userId: $("user-id").value },
@@ -331,6 +376,8 @@ $("member-form").addEventListener(
     showSecret("Member credential — copy before leaving", r.token);
     $("member-form").reset();
     await members();
+    await refreshStatus();
+    await loadCatalog();
   }),
 );
 $("session-form").addEventListener(
@@ -340,6 +387,9 @@ $("session-form").addEventListener(
       method: "POST",
       body: {},
       credential: $("member-token").value.trim(),
+    }).catch(async (error) => {
+      if (error.status === 409) await refreshStatus();
+      throw error;
     });
     if (r.mcp.url.startsWith("/")) r.mcp.url = location.origin + r.mcp.url;
     showSecret("Session connection for Oyster", r);

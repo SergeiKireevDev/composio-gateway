@@ -5,8 +5,11 @@ export function createProvider({
   makeClient = (apiKey) => new Composio({ apiKey, allowTracking: false }),
 } = {}) {
   return {
-    async page(apiKey, cursor) {
+    async page(apiKey, cursor, toolkit) {
+      if (typeof toolkit !== "string" || !/^[a-z0-9_-]+$/.test(toolkit))
+        throw new Error("A single toolkit is required for catalog requests.");
       const url = new URL("https://backend.composio.dev/api/v3.1/tools");
+      url.searchParams.set("toolkit_slug", toolkit);
       url.searchParams.set("limit", "1000");
       url.searchParams.set("important", "false");
       if (cursor) url.searchParams.set("cursor", cursor);
@@ -25,11 +28,18 @@ export function createProvider({
       return data;
     },
     async connectedToolkits(apiKey, userId) {
-      const c = makeClient(apiKey), slugs = new Set(), seen = new Set();
+      const c = makeClient(apiKey),
+        slugs = new Set(),
+        seen = new Set();
       let cursor;
       do {
         const page = await c.connectedAccounts.list(
-          { userIds: [userId], statuses: ["ACTIVE"], limit: 100, ...(cursor ? { cursor } : {}) },
+          {
+            userIds: [userId],
+            statuses: ["ACTIVE"],
+            limit: 100,
+            ...(cursor ? { cursor } : {}),
+          },
           { signal: AbortSignal.timeout(60000) },
         );
         for (const account of page.items) {
@@ -37,7 +47,8 @@ export function createProvider({
             slugs.add(account.toolkit.slug);
         }
         cursor = page.nextCursor;
-        if (cursor && seen.has(cursor)) throw new Error("Connected account pagination repeated a cursor.");
+        if (cursor && seen.has(cursor))
+          throw new Error("Connected account pagination repeated a cursor.");
         seen.add(cursor);
       } while (cursor);
       return [...slugs];
