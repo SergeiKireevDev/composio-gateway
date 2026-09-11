@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { openStore, token, hash, equal, secretFile } from "./store.mjs";
+import { openStore, token, hash, matchesTokenHash, loadAdminTokenHash } from "./store.mjs";
 import { createProvider } from "./composio.mjs";
 const root = fileURLToPath(new URL(".", import.meta.url));
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -71,9 +71,15 @@ export function createGateway({
   }
   const store = openStore(dataDir),
     { db } = store;
-  adminToken ??= secretFile(join(dataDir, "admin.token"));
-  if (typeof adminToken !== "string" || !adminToken.trim())
-    throw new Error("ADMIN_TOKEN must not be empty.");
+  let adminTokenHash;
+  try {
+    adminTokenHash = loadAdminTokenHash(dataDir, adminToken);
+  } catch (error) {
+    db.close();
+    throw error;
+  } finally {
+    adminToken = undefined;
+  }
   let scan = { running: false, count: 0, error: null },
     mutations = Promise.resolve(),
     scanTask = Promise.resolve();
@@ -221,7 +227,7 @@ export function createGateway({
         return;
       }
       if (path.startsWith("/api/admin/")) {
-        if (!equal(bearer(req), adminToken))
+        if (!matchesTokenHash(bearer(req), adminTokenHash))
           throw fail(401, "Invalid admin token.");
         if (method === "GET" && path === "/api/admin/status") {
           const catalog = store.get("catalog", []);
@@ -594,12 +600,15 @@ if (
     publicUrl: process.env.PUBLIC_URL,
     ttl: Number(process.env.SESSION_TTL_SECONDS || 3600),
   });
+  // Best-effort removal from this process and subsequently spawned children.
+  // This cannot erase Railway's variable store, OS snapshots, or old JS strings.
+  delete process.env.ADMIN_TOKEN;
   const port = Number(process.env.PORT || 8788),
     host = process.env.HOST || "127.0.0.1";
   app.server.listen(port, host, () => {
     console.log(`Composio Gateway listening on http://${host}:${port}`);
     console.log(
-      `Admin token: ${process.env.ADMIN_TOKEN ? "configured via environment" : join(dataDir, "admin.token")}`,
+      `Admin credential verifier: ${join(dataDir, "admin.token.sha256")} (log in with the original token)`,
     );
   });
   for (const sig of ["SIGINT", "SIGTERM"])

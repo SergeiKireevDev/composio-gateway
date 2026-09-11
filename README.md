@@ -4,14 +4,16 @@ A small self-hosted admin interface and MCP gateway. Enter a Composio project AP
 
 ## Run
 
-Requires Node.js 22.19 or newer.
+Requires Node.js 22.19 or newer. On the first startup, set `ADMIN_TOKEN` to a long random secret (at least 32 random bytes) using your environment or deployment secret manager. Keep the original in your password manager; only its SHA-256 hash is stored in `data/admin.token.sha256`.
 
 ```sh
 npm ci
 npm start
 ```
 
-Open `http://127.0.0.1:8788`. Read the generated admin token from `data/admin.token` on the server and enter it in the login form. The browser holds the admin credential only in memory; reloading locks the interface.
+Open `http://127.0.0.1:8788` and enter the original `ADMIN_TOKEN` in the login form, **not its hash**. The browser holds the admin credential only in memory; reloading locks the interface.
+
+On upgrades, an existing `data/admin.token` is automatically hashed and removed; the same token still logs in. Save your existing token before upgrading, as it cannot be recovered from the hash afterward. A stored hash allows restarts without `ADMIN_TOKEN`; supplying it again replaces the stored hash. See [admin authentication](docs/admin-authentication.md) for Railway setup, rotation, and security limits.
 
 1. In **Connection**, enter your Composio project API key. The gateway automatically scans every catalog page and shows progress. A failed scan leaves the previous configuration intact.
 2. In **Tool permissions**, search or filter by app, disable individual tools or all filtered tools, then save. Initially all fetched tools are enabled. The saved policy is shared by all members.
@@ -92,7 +94,7 @@ Environment variables are read directly; `.env` is not automatically loaded. Use
 | `DATA_DIR`            | Project `data/` | Persistent SQLite database and encryption key       |
 | `PUBLIC_URL`          | Unset           | Externally reachable HTTP(S) origin, without a path |
 | `SESSION_TTL_SECONDS` | `3600`          | Session lifetime, 60–86400 seconds                  |
-| `ADMIN_TOKEN`         | Generated file  | Optional administrator credential                   |
+| `ADMIN_TOKEN`         | Unset           | Required on fresh install; overrides persisted admin hash |
 
 Use an HTTPS reverse proxy on a VPS so admin, member and session bearer credentials are protected in transit. The gateway does not trust forwarded Host headers to construct session URLs. Configure `PUBLIC_URL` explicitly.
 
@@ -103,9 +105,9 @@ docker build -t composio-gateway .
 docker run -d --name composio-gateway --restart unless-stopped \
   -p 127.0.0.1:8788:8788 \
   -e PUBLIC_URL=https://gateway.example.com \
+  -e ADMIN_TOKEN \
   -v composio-gateway-data:/app/data \
   composio-gateway
-docker exec composio-gateway cat /app/data/admin.token
 ```
 
 Back up the entire data directory, including `encryption.key`; the database cannot be decrypted without it. The database contains hashed member/session tokens and AES-256-GCM-encrypted Composio credentials. Keep the data directory private: encryption does not protect secrets from an administrator who can read both the database and its local encryption key. Secrets are excluded from source control and the Docker build context.

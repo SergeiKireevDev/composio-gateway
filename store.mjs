@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import {
   randomBytes,
@@ -10,8 +10,51 @@ import {
 } from "node:crypto";
 export const token = () => randomBytes(32).toString("base64url");
 export const hash = (s) => createHash("sha256").update(s).digest("hex");
-export const equal = (a, b) =>
-  timingSafeEqual(Buffer.from(hash(a)), Buffer.from(hash(b)));
+export const matchesTokenHash = (candidate, expectedHash) =>
+  timingSafeEqual(Buffer.from(hash(candidate), "hex"), expectedHash);
+
+// ADMIN_TOKEN is a high-entropy bearer token, not a human-chosen password.
+// Only its SHA-256 verifier is persisted. The plaintext hash is not accepted
+// as a bearer credential (incoming credentials are always hashed again).
+export function loadAdminTokenHash(dir, suppliedToken) {
+  const path = join(dir, "admin.token.sha256");
+  const legacyPath = join(dir, "admin.token");
+  const readOptional = (p) => {
+    try { return readFileSync(p, "utf8").trim(); }
+    catch (e) { if (e.code === "ENOENT") return undefined; throw e; }
+  };
+  let digest;
+  if (suppliedToken !== undefined) {
+    if (typeof suppliedToken !== "string" || !suppliedToken.trim())
+      throw new Error("ADMIN_TOKEN must not be empty.");
+    digest = hash(suppliedToken);
+    suppliedToken = undefined;
+  } else {
+    const saved = readOptional(path);
+    if (saved !== undefined) {
+      if (!/^[a-f0-9]{64}$/.test(saved))
+        throw new Error("Invalid admin.token.sha256. Set ADMIN_TOKEN to reset it.");
+      digest = saved;
+    } else {
+      let legacy = readOptional(legacyPath);
+      if (!legacy)
+        throw new Error("Set ADMIN_TOKEN to a long random secret for the first startup.");
+      digest = hash(legacy);
+      legacy = undefined;
+    }
+  }
+  // Atomic replacement: a failed write must not destroy the previous verifier
+  // or delete the legacy credential before its replacement is persisted.
+  const temporary = `${path}.${token()}.tmp`;
+  try {
+    writeFileSync(temporary, digest + "\n", { mode: 0o600, flag: "wx" });
+    renameSync(temporary, path);
+  } finally {
+    try { unlinkSync(temporary); } catch (e) { if (e.code !== "ENOENT") throw e; }
+  }
+  try { unlinkSync(legacyPath); } catch (e) { if (e.code !== "ENOENT") throw e; }
+  return Buffer.from(digest, "hex");
+}
 export function secretFile(path) {
   try {
     return readFileSync(path, "utf8").trim();
