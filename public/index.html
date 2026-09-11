@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Composio Gateway</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <aside>
+      <a class="brand" href="/" aria-label="Composio Gateway home"
+        ><span class="mark">c↗</span> composio<span class="brand-sub"
+          >GATEWAY</span
+        ></a
+      >
+      <div class="sidebar-label">WORKSPACE</div>
+      <nav>
+        <button class="nav active" data-tab="tools">
+          ▦ <span>Tool permissions</span></button
+        ><button class="nav" data-tab="members">
+          ♙ <span>Members & sessions</span></button
+        ><button class="nav" data-tab="settings">
+          ⚙ <span>Connection</span>
+        </button>
+      </nav>
+      <div class="sidebar-bottom">
+        <span class="dot"></span> Private gateway<br /><small
+          >Your key stays here.</small
+        ><button id="logout" class="subtle">Lock interface ↗</button>
+      </div>
+    </aside>
+    <main>
+      <header>
+        <span
+          >WORKSPACE <span class="slash">/</span>
+          <span id="breadcrumb">Tool permissions</span></span
+        ><span class="badge">SELF-HOSTED</span>
+      </header>
+      <section id="login" class="login card">
+        <span class="eyebrow">WELCOME TO YOUR GATEWAY</span>
+        <h1>One key.<br />You set the permissions.</h1>
+        <p>
+          Manage the Composio tools your agents can use, and issue private
+          sessions to your members.
+        </p>
+        <form id="login-form">
+          <label for="admin-token">Admin token</label
+          ><input
+            id="admin-token"
+            type="password"
+            autocomplete="current-password"
+            required
+            placeholder="Enter your gateway admin token"
+          />
+          <p class="hint">
+            On first start, find it in <code>data/admin.token</code> on the
+            server.
+          </p>
+          <button class="primary" type="submit">
+            Unlock gateway <span>↗</span>
+          </button>
+        </form>
+      </section>
+      <div id="workspace" hidden>
+        <section id="tools-tab" class="tab">
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">CONTROL WHAT YOUR AGENTS CAN DO</span>
+              <h1>Tool permissions</h1>
+              <p>Choose the tools available to every gateway member.</p>
+            </div>
+            <button id="refresh" class="secondary">↻ Sync catalog</button>
+          </div>
+          <div class="stats">
+            <article>
+              <span>Catalog tools</span><strong id="total">0</strong
+              ><small>Fetched from Composio</small>
+            </article>
+            <article>
+              <span>Enabled</span><strong id="enabled-count">0</strong
+              ><small>Available in new sessions</small>
+            </article>
+            <article>
+              <span>Disabled</span><strong id="disabled-count">0</strong
+              ><small>Excluded from sessions</small>
+            </article>
+            <article>
+              <span>Connection</span
+              ><strong id="connection" class="status-value">Not set up</strong
+              ><small id="synced-at">Add your API key to begin</small>
+            </article>
+          </div>
+          <div id="scan-status" class="notice" hidden></div>
+          <div class="card catalog">
+            <div class="catalog-heading">
+              <h2>
+                Tool catalog <span id="result-count" class="pill">0</span>
+              </h2>
+              <span class="hint">Permissions apply to all members</span>
+            </div>
+            <div class="filters">
+              <input
+                id="search"
+                type="search"
+                placeholder="Search tools, slugs, or descriptions…"
+                aria-label="Search tools"
+              /><select id="toolkit" aria-label="Filter by app">
+                <option value="">All apps</option></select
+              ><select id="filter" aria-label="Filter by permission">
+                <option value="all">All permissions</option>
+                <option value="enabled">Enabled</option>
+                <option value="disabled">Disabled</option>
+              </select>
+            </div>
+            <div class="bulk">
+              <span id="showing">No tools loaded</span>
+              <div>
+                <button id="enable-visible" class="subtle">
+                  Enable filtered</button
+                ><button id="disable-visible" class="subtle">
+                  Disable filtered
+                </button>
+              </div>
+            </div>
+            <div id="tools-list"></div>
+            <div class="pagination">
+              <button id="previous" class="secondary">← Previous</button
+              ><span id="page-number">Page 1</span
+              ><button id="next" class="secondary">Next →</button>
+            </div>
+          </div>
+          <div id="save-bar" class="save-bar" hidden>
+            <div>
+              <strong>Unsaved permission changes</strong
+              ><small
+                >Saving revokes existing sessions. Members can request a new
+                one.</small
+              >
+            </div>
+            <button id="discard" class="secondary">Discard</button
+            ><button id="save" class="primary">Save permissions</button>
+          </div>
+        </section>
+        <section id="members-tab" class="tab" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">ACCESS & IDENTITY</span>
+              <h1>Members & sessions</h1>
+              <p>
+                Each member gets a credential bound to their Composio user ID.
+              </p>
+            </div>
+          </div>
+          <div class="two-column">
+            <div class="card padded">
+              <h2>Add a member</h2>
+              <form id="member-form">
+                <label for="member-name">Member name</label
+                ><input
+                  id="member-name"
+                  required
+                  maxlength="200"
+                  placeholder="Personal Oyster"
+                /><label for="user-id">Composio user ID</label
+                ><input
+                  id="user-id"
+                  required
+                  maxlength="200"
+                  placeholder="user_alex"
+                />
+                <p class="hint">
+                  Use the ID associated with this person's Composio connections.
+                  Members cannot change it when requesting a session.
+                </p>
+                <button class="primary">Create member credential ↗</button>
+              </form>
+            </div>
+            <div class="card padded">
+              <h2>Request a session</h2>
+              <p>
+                Use a member credential to receive an expiring MCP token for
+                Oyster.
+              </p>
+              <form id="session-form">
+                <label for="member-token">Member credential</label
+                ><input
+                  id="member-token"
+                  required
+                  type="password"
+                  autocomplete="off"
+                /><button class="secondary">Issue test session</button>
+              </form>
+              <p class="hint">
+                API: <code>POST /api/sessions</code> with
+                <code>Authorization: Bearer &lt;member credential&gt;</code> and
+                an empty JSON body.
+              </p>
+            </div>
+          </div>
+          <div id="credential-box" class="card padded secret-box" hidden>
+            <h2 id="credential-title">Copy your credential</h2>
+            <p>Shown once. Store it in your client's secret configuration.</p>
+            <pre id="credential-output"></pre>
+            <button id="copy-credential" class="secondary">Copy</button
+            ><button id="dismiss-credential" class="subtle">Dismiss</button>
+          </div>
+          <div class="card padded">
+            <h2>Members</h2>
+            <div id="members-list"></div>
+          </div>
+        </section>
+        <section id="settings-tab" class="tab" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">COMPOSIO CONNECTION</span>
+              <h1>Keep your key private.</h1>
+              <p>
+                The gateway authenticates to Composio on behalf of your members.
+              </p>
+            </div>
+          </div>
+          <div class="card padded settings">
+            <h2>Project API key</h2>
+            <p>
+              Saving starts a complete catalog scan. Your connection is updated
+              only after the scan succeeds.
+            </p>
+            <form id="key-form">
+              <label for="api-key">Composio API key</label
+              ><input
+                id="api-key"
+                type="password"
+                required
+                autocomplete="off"
+                placeholder="Paste your Composio project API key"
+              /><button class="primary">Connect & fetch tools ↗</button>
+            </form>
+            <p class="hint">
+              The key is encrypted on disk and never returned to clients.
+              Replacing it or syncing the catalog revokes existing sessions.
+            </p>
+          </div>
+          <div class="card padded settings">
+            <h2>Session defaults</h2>
+            <dl>
+              <dt>Authentication</dt>
+              <dd>Member bearer credential</dd>
+              <dt>Lifetime</dt>
+              <dd id="ttl">1 hour</dd>
+              <dt>Tool policy</dt>
+              <dd>Shared across all members</dd>
+              <dt>Sandbox & proxy execution</dt>
+              <dd>Disabled</dd>
+              <dt>App OAuth</dt>
+              <dd>Available through Composio connection tools</dd>
+            </dl>
+          </div>
+        </section>
+      </div>
+      <div id="message" role="status" hidden></div>
+    </main>
+  </body>
+</html>
