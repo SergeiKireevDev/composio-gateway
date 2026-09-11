@@ -4,6 +4,10 @@ A small self-hosted admin interface and MCP gateway. Enter a Composio project AP
 
 ## Deploy to Fly.io
 
+[![Deploy to Fly.io](https://img.shields.io/badge/Deploy%20to-Fly.io-7B36ED?style=for-the-badge&logo=flydotio&logoColor=white)](https://github.com/SergeiKireevDev/composio-gateway/actions/workflows/deploy-fly.yml)
+
+The button opens this repository’s deployment workflow (available after the deployment PR is merged). It does not deploy immediately: configure the secret first, then click **Run workflow**. If you forked the project, use the workflow in your own fork’s **Actions** tab instead.
+
 Use **Actions → Deploy to Fly.io → Run workflow** after configuring your Fly account and the `FLY_API_TOKEN` secret. See the [deployment guide](docs/fly-deployment.md) for setup, persistent storage, admin login, costs, and updates. This provisions one machine and one volume; it does not change the admin authentication model.
 
 ## Run
