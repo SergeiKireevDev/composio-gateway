@@ -225,8 +225,13 @@
           <div class="card padded settings">
             <h2>Project API key</h2>
             <p>
-              Saving scans only apps connected by active members. Your
-              connection is updated only after the scan succeeds.
+              Set COMPOSIO_API_TOKEN in your deployment variables for automatic
+              setup, or use the form below. Scans fetch only connected apps.
+            </p>
+            <p id="key-managed" class="notice" hidden>
+              Configured by COMPOSIO_API_TOKEN. To change the Composio key, update
+              that deployment variable and redeploy. The key is never displayed
+              here.
             </p>
             <form id="key-form">
               <label for="api-key">Composio API key</label

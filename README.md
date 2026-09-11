@@ -15,12 +15,29 @@ Open `http://127.0.0.1:8788` and enter the original `ADMIN_TOKEN` in the login f
 
 On upgrades, an existing `data/admin.token` is automatically hashed and removed; the same token still logs in. Save your existing token before upgrading, as it cannot be recovered from the hash afterward. A stored hash allows restarts without `ADMIN_TOKEN`; supplying it again replaces the stored hash. See [admin authentication](docs/admin-authentication.md) for Railway setup, rotation, and security limits.
 
-1. In **Connection**, enter your Composio project API key. The gateway fetches tools only for apps connected by active gateway members, never the entire Composio catalog. With no members or connected apps, the catalog stays empty and no tool-catalog requests are made.
+1. Set **`COMPOSIO_API_TOKEN`** to your Composio project API key in your deployment variables and restart/redeploy. The gateway configures it automatically; no key entry in the interface is needed. Alternatively, omit the variable and enter the key in **Connection**. Tools are fetched only for apps connected by active gateway members. With no members or connected apps, the catalog stays empty and no tool-catalog requests are made.
 2. In **Members & sessions**, create a member using the Composio user ID associated with their app connections. Copy the member credential; it is only displayed once. Adding or reactivating a member automatically refreshes the connected-app catalog.
 3. In **Tool permissions**, filter by member to see their connected apps at the last sync, then search or filter by app and disable tools. Member selection only filters the view: the saved policy remains shared by all members. Initially newly discovered tools are enabled.
 4. Use the member credential to request a session, or use **Issue test session**. With no apps connected, the session allows connection management only. After connecting an app, click **Sync catalog**. If a session request discovers an app absent from the cache, it starts a scoped refresh and returns HTTP 409; retry after the refresh finishes. Copy the successful session's MCP URL and Authorization header into Oyster.
 
 App OAuth remains available through the session's Composio connection-management tools. This version does not include a separate Gmail/GitHub OAuth connection page. A member cannot change their Composio user ID or session policy through the session endpoint.
+
+## Railway configuration
+
+In the gateway service's **Variables** tab, set:
+
+- `COMPOSIO_API_TOKEN`: your **Composio project API key**, not a member/session token and not a randomly generated value.
+- `ADMIN_TOKEN`: your separate random admin login token.
+- `DATA_DIR=/app/data`: attach a persistent volume at that path.
+- `PUBLIC_URL`: the service's public HTTPS origin.
+
+Redeploy to apply the variables. **Connection** will show that Composio is managed by `COMPOSIO_API_TOKEN` and hide the key-entry form. The admin status API reports `keySource: "environment"`, never the key itself. Replacing it through `/api/admin/config` is rejected while the variable is configured; manual catalog refresh remains available.
+
+A new or changed environment key immediately replaces the encrypted saved key, revokes old sessions, clears the previous catalog, and starts a connected-app scan. A failed scan is shown as an error and never falls back to the old project's key. An unchanged key reuses the existing scoped catalog and sessions on restart. Blank, whitespace-containing, non-ASCII, or over-1000-character values fail startup; omit the variable rather than leaving it empty when using the UI.
+
+The key is stored encrypted in the database, as with UI configuration. Removing the variable makes the saved key editable through the UI again; it does not erase the encrypted copy. Deleting the Node process's environment entry after initialization does not erase Railway's variable store, operating-system snapshots, or historical backups.
+
+**The variable does not replace persistent storage.** Without a volume, members, permissions, encryption keys, and sessions can still disappear on redeploy even though the Composio project key is restored automatically. It also does not connect GitHub or other apps for each member; those OAuth connections still belong to the member's Composio user ID.
 
 ## Request a session
 
@@ -99,6 +116,7 @@ Environment variables are read directly; `.env` is not automatically loaded. Use
 | `PUBLIC_URL`          | Unset           | Externally reachable HTTP(S) origin, without a path |
 | `SESSION_TTL_SECONDS` | `3600`          | Session lifetime, 60–86400 seconds                  |
 | `ADMIN_TOKEN`         | Unset           | Required on fresh install; overrides persisted admin hash |
+| `COMPOSIO_API_TOKEN`  | Unset           | Composio project API key; configures at startup and locks UI key edits |
 
 Use an HTTPS reverse proxy on a VPS so admin, member and session bearer credentials are protected in transit. The gateway does not trust forwarded Host headers to construct session URLs. Configure `PUBLIC_URL` explicitly.
 
@@ -110,6 +128,7 @@ docker run -d --name composio-gateway --restart unless-stopped \
   -p 127.0.0.1:8788:8788 \
   -e PUBLIC_URL=https://gateway.example.com \
   -e ADMIN_TOKEN \
+  -e COMPOSIO_API_TOKEN \
   -v composio-gateway-data:/app/data \
   composio-gateway
 ```

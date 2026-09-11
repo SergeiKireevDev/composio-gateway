@@ -189,7 +189,14 @@ async function loadCatalog() {
 async function refreshStatus() {
   const before = status.epoch;
   status = await api("/api/admin/status");
-  $("connection").textContent = status.configured ? "Connected" : "Not set up";
+  const managed = status.keySource === "environment";
+  $("key-form").hidden = managed;
+  $("key-managed").hidden = !managed;
+  $("connection").textContent = managed
+    ? "Environment"
+    : status.configured
+      ? "Connected"
+      : "Not set up";
   $("synced-at").textContent = status.syncedAt
     ? `Synced ${new Date(status.syncedAt).toLocaleString()}`
     : "Add your API key to begin";
