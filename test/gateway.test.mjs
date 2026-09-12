@@ -18,6 +18,128 @@ const items = [
     toolkit: { slug: "github" },
   },
 ];
+test("member MCP authenticates, lists only session creation, and returns a usable session", async (t) => {
+  const f = await fixture(t);
+  await f.setup();
+  const m = await f.member();
+  const rpc = (method, params) =>
+    f.req("/mcp", "POST", { jsonrpc: "2.0", id: 1, method, params }, m.token);
+  const init = await rpc("initialize", { protocolVersion: "2025-03-26" });
+  assert.equal(init.data.result.protocolVersion, "2025-03-26");
+  assert.deepEqual(init.data.result.capabilities, { tools: {} });
+  const list = await rpc("tools/list");
+  assert.deepEqual(
+    list.data.result.tools.map((t) => t.name),
+    ["GATEWAY_CREATE_SESSION"],
+  );
+  const created = await rpc("tools/call", {
+    name: "GATEWAY_CREATE_SESSION",
+    arguments: {},
+  });
+  const session = created.data.result.structuredContent;
+  assert.deepEqual(JSON.parse(created.data.result.content[0].text), session);
+  assert.equal(session.mcp.url, "https://gateway.test/mcp");
+  assert.equal(session.mode, "connected");
+  assert.equal(JSON.stringify(created).includes("secret-project-key"), false);
+  assert.equal(f.calls.create.at(-1).userId, "alice");
+  assert.equal(f.calls.forward.length, 0);
+  assert.equal(
+    (
+      await f.req(
+        "/mcp",
+        "POST",
+        { jsonrpc: "2.0", id: 2, method: "ping" },
+        session.token,
+      )
+    ).status,
+    200,
+  );
+  assert.equal(f.calls.forward.length, 1);
+});
+
+test("member MCP rejects execution, identity overrides, invalid credentials and revoked members", async (t) => {
+  const f = await fixture(t);
+  await f.setup();
+  const m = await f.member();
+  for (const params of [
+    { name: "COMPOSIO_MULTI_EXECUTE_TOOL", arguments: {} },
+    { name: "GATEWAY_CREATE_SESSION", arguments: { userId: "another-user" } },
+    { name: "GATEWAY_CREATE_SESSION", arguments: [] },
+  ]) {
+    const r = await f.req(
+      "/mcp",
+      "POST",
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params },
+      m.token,
+    );
+    assert.equal(r.data.error.code, -32602);
+  }
+  for (const credential of ["invalid-token", "admin-test"]) {
+    assert.equal(
+      (
+        await f.req(
+          "/mcp",
+          "POST",
+          { jsonrpc: "2.0", id: 1, method: "tools/list" },
+          credential,
+        )
+      ).status,
+      401,
+    );
+  }
+  await f.req(`/api/admin/members/${m.id}/revoke`, "POST");
+  assert.equal(
+    (
+      await f.req(
+        "/mcp",
+        "POST",
+        { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        m.token,
+      )
+    ).status,
+    401,
+  );
+  assert.equal(f.calls.create.length, 0);
+  assert.equal(f.calls.forward.length, 0);
+});
+
+test("member MCP honors tool policy, onboarding, notifications and session limits", async (t) => {
+  const f = await fixture(t);
+  await f.setup();
+  const m = await f.member();
+  const b = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: { name: "GATEWAY_CREATE_SESSION", arguments: {} },
+  };
+  const notification = await fetch(f.url + "/mcp", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${m.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ...b, id: undefined }),
+  });
+  assert.equal(notification.status, 202);
+  assert.equal(await notification.text(), "");
+  assert.equal(f.calls.create.length, 0);
+  await f.req("/api/admin/policy", "PUT", {
+    disabled: items.map((t) => t.slug),
+  });
+  const denied = await f.req("/mcp", "POST", b, m.token);
+  assert.equal(denied.data.result.isError, true);
+  assert.match(denied.data.result.content[0].text, /No enabled tools/);
+  f.provider.connectedToolkits = async () => [];
+  for (let i = 0; i < 10; i++) {
+    const r = await f.req("/mcp", "POST", b, m.token);
+    assert.equal(r.data.result.structuredContent.mode, "onboarding");
+  }
+  const limited = await f.req("/mcp", "POST", b, m.token);
+  assert.equal(limited.data.result.isError, true);
+  assert.match(limited.data.result.content[0].text, /Maximum 10/);
+});
+
 export async function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), "gateway-test-"));
   let clock = Date.now();
