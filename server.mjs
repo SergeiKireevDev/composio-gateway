@@ -115,6 +115,12 @@ export function createGateway({
       } catch {}
     }
   }
+  const sessionId = (row) => hash(`admin-session:${row.token_hash}`);
+  function revokeSession(row) {
+    db.prepare("DELETE FROM sessions WHERE token_hash=?").run(row.token_hash);
+    for (const c of active.get(row.token_hash) || []) c.abort();
+    if (store.get("apiKey")) cleanup([row], key());
+  }
   function revoke(memberId) {
     const rows = memberId
       ? db.prepare("SELECT * FROM sessions WHERE member_id=?").all(memberId)
@@ -374,6 +380,41 @@ export function createGateway({
             }),
           );
           send(res, 200, { saved: true });
+          return;
+        }
+        if (method === "GET" && path === "/api/admin/sessions") {
+          const rows = db
+            .prepare(
+              `SELECT s.*, m.name, m.user_id
+            FROM sessions s JOIN members m ON m.id=s.member_id
+            WHERE s.expires>? AND s.epoch=? AND m.active=1
+            ORDER BY s.expires DESC, s.token_hash`,
+            )
+            .all(now(), store.get("epoch", 0));
+          send(res, 200, {
+            items: rows.map((row) => ({
+              id: sessionId(row),
+              memberId: row.member_id,
+              memberName: row.name,
+              userId: row.user_id,
+              expiresAt: new Date(row.expires).toISOString(),
+            })),
+          });
+          return;
+        }
+        const sessionMatch = path.match(
+          /^\/api\/admin\/sessions\/([a-f0-9]{64})\/revoke$/,
+        );
+        if (method === "POST" && sessionMatch) {
+          await serialize(() => {
+            const row = db
+              .prepare("SELECT * FROM sessions")
+              .all()
+              .find((s) => sessionId(s) === sessionMatch[1]);
+            if (!row) throw fail(404, "Session not found.");
+            revokeSession(row);
+          });
+          send(res, 200, { revoked: true });
           return;
         }
         if (method === "GET" && path === "/api/admin/members") {
@@ -645,11 +686,7 @@ export function createGateway({
         const s = session(req);
         if (method === "DELETE") {
           await serialize(() => {
-            db.prepare("DELETE FROM sessions WHERE token_hash=?").run(
-              s.token_hash,
-            );
-            for (const c of active.get(s.token_hash) || []) c.abort();
-            cleanup([s], key());
+            revokeSession(s);
           });
           send(res, 200, { revoked: true });
           return;

@@ -22,6 +22,14 @@ On upgrades, an existing `data/admin.token` is automatically hashed and removed;
 
 App OAuth remains available through the session's Composio connection-management tools. This version does not include a separate Gmail/GitHub OAuth connection page. A member cannot change their Composio user ID or session policy through the session endpoint.
 
+## Manage active sessions
+
+Open **Members & sessions → Active sessions** to list all currently valid gateway sessions, including the member, Composio user ID, a non-secret session identifier, and expiry time. Click **Refresh sessions** to reload the list, or **Revoke session** to end one session without affecting the member credential or other sessions. Revocation also aborts that session's in-flight requests and attempts upstream cleanup. Session bearer tokens and upstream credentials are never shown.
+
+The list excludes expired and revoked sessions; it is not an audit history. Member-level **Revoke** still disables the member and all of their sessions.
+
+Admin API: `GET /api/admin/sessions` lists sessions; `POST /api/admin/sessions/<id>/revoke` revokes one. Both require the admin bearer credential, not a member or session token. The listed identifier cannot be used as a bearer token.
+
 ## Railway configuration
 
 In the gateway service's **Variables** tab, set:

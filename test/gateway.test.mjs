@@ -18,6 +18,101 @@ const items = [
     toolkit: { slug: "github" },
   },
 ];
+test("admin can list and revoke one session without exposing credentials or revoking others", async (t) => {
+  const f = await fixture(t);
+  await f.setup();
+  const alice = await f.member("alice");
+  const bob = await f.member("bob");
+  const first = (await f.req("/api/sessions", "POST", {}, alice.token)).data;
+  const second = (await f.req("/api/sessions", "POST", {}, alice.token)).data;
+  const third = (await f.req("/api/sessions", "POST", {}, bob.token)).data;
+  const listed = await f.req("/api/admin/sessions");
+  assert.equal(listed.status, 200);
+  assert.equal(listed.data.items.length, 3);
+  const text = JSON.stringify(listed.data);
+  for (const secret of [
+    first.token,
+    second.token,
+    third.token,
+    alice.token,
+    "secret-project-key",
+    "trs_test",
+    "token_hash",
+    "upstream",
+  ])
+    assert.equal(text.includes(secret), false);
+  const id = listed.data.items.find((s) => s.memberId === bob.id).id;
+  assert.match(id, /^[a-f0-9]{64}$/);
+  for (const credential of ["invalid", alice.token, first.token]) {
+    assert.equal(
+      (await f.req("/api/admin/sessions", "GET", undefined, credential)).status,
+      401,
+    );
+    assert.equal(
+      (await f.req(`/api/admin/sessions/${id}/revoke`, "POST", {}, credential))
+        .status,
+      401,
+    );
+  }
+  const before = (await f.req("/api/admin/status")).data.epoch;
+  assert.equal(
+    (await f.req(`/api/admin/sessions/${id}/revoke`, "POST")).status,
+    200,
+  );
+  assert.equal((await f.req("/api/admin/status")).data.epoch, before);
+  const ping = { jsonrpc: "2.0", id: 1, method: "ping" };
+  assert.equal((await f.req("/mcp", "POST", ping, third.token)).status, 401);
+  for (const credential of [first.token, second.token])
+    assert.equal((await f.req("/mcp", "POST", ping, credential)).status, 200);
+  assert.equal((await f.req("/api/admin/sessions")).data.items.length, 2);
+  assert.equal(
+    (await f.req(`/api/admin/sessions/${id}/revoke`, "POST")).status,
+    404,
+  );
+  assert.equal(
+    (await f.req("/api/sessions", "POST", {}, bob.token)).status,
+    201,
+  );
+  assert.equal(f.calls.remove.length, 1);
+  f.advance(3600001);
+  assert.deepEqual((await f.req("/api/admin/sessions")).data.items, []);
+});
+
+test("individual admin revocation aborts an in-flight MCP request", async (t) => {
+  const f = await fixture(t);
+  await f.setup();
+  const m = await f.member();
+  const issued = (await f.req("/api/sessions", "POST", {}, m.token)).data;
+  const id = (await f.req("/api/admin/sessions")).data.items[0].id;
+  let entered,
+    aborted = false;
+  const started = new Promise((resolve) => {
+    entered = resolve;
+  });
+  f.provider.forward = async (up, body, version, signal) =>
+    new Promise((resolve, reject) => {
+      signal.addEventListener(
+        "abort",
+        () => {
+          aborted = true;
+          reject(Error("aborted"));
+        },
+        { once: true },
+      );
+      entered();
+    });
+  const pending = f.req(
+    "/mcp",
+    "POST",
+    { jsonrpc: "2.0", id: 1, method: "ping" },
+    issued.token,
+  );
+  await started;
+  await f.req(`/api/admin/sessions/${id}/revoke`, "POST");
+  assert.notEqual((await pending).status, 200);
+  assert.equal(aborted, true);
+});
+
 test("member MCP authenticates, lists only session creation, and returns a usable session", async (t) => {
   const f = await fixture(t);
   await f.setup();
