@@ -208,6 +208,20 @@ export function createGateway({
       store.transaction(() => {
         if (closed) return;
         revoke();
+        // Remember previously seen tools even while their apps are disconnected.
+        // Seed from the saved catalog on upgrade to preserve existing permissions.
+        const disabled = new Set(store.get("disabled", []));
+        const known = new Set([
+          ...store.get("knownToolSlugs", []),
+          ...store.get("catalog", []).map((t) => t.slug),
+          ...disabled,
+        ]);
+        for (const slug of all.keys()) {
+          if (!known.has(slug)) disabled.add(slug);
+          known.add(slug);
+        }
+        store.set("knownToolSlugs", [...known]);
+        store.set("disabled", [...disabled]);
         store.set("apiKey", store.seal(apiKey));
         store.set("catalog", [...all.values()]);
         store.set("catalogConnections", connections);
