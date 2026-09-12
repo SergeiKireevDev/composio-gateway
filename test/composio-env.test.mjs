@@ -69,6 +69,11 @@ async function fixture(t, composioApiToken) {
       userId: "alice",
     });
     await app.waitForScan();
+    // Session lifecycle tests explicitly enable the discovered fixture tool.
+    assert.equal(
+      (await req("/api/admin/policy", "PUT", { disabled: [] })).status,
+      200,
+    );
     return response.data;
   };
   return {

@@ -95,9 +95,22 @@ test("browser: connected catalogs, member filters, shared policy, session API, m
   await member("Mail member", "mail_user");
   await page.getByRole("button", { name: "Tool permissions" }).click();
   await expect(page.locator(".tool-row")).toHaveCount(3);
+  await expect(page.locator("#disabled-count")).toHaveText("3");
+  for (const slug of [
+    "GITHUB_DELETE_REPO",
+    "GMAIL_FETCH_EMAILS",
+    "GMAIL_SEND_EMAIL",
+  ])
+    await expect(
+      page.getByLabel(`Enable ${slug}`, { exact: true }),
+    ).not.toBeChecked();
+  await page.getByLabel("Enable GITHUB_DELETE_REPO", { exact: true }).check();
+  await page.getByLabel("Enable GMAIL_FETCH_EMAILS", { exact: true }).check();
   await page.getByLabel("Search tools", { exact: true }).fill("SEND");
   await expect(page.locator(".tool-row")).toHaveCount(1);
-  await page.getByLabel("Enable GMAIL_SEND_EMAIL", { exact: true }).uncheck();
+  await expect(
+    page.getByLabel("Enable GMAIL_SEND_EMAIL", { exact: true }),
+  ).not.toBeChecked();
   await page.getByLabel("Search tools", { exact: true }).fill("");
 
   // Switching member scopes is a local filter, not a policy reset.

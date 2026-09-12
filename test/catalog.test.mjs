@@ -234,6 +234,10 @@ test("new connection triggers a scoped refresh before issuing an executable sess
   f.connections.set("alice", ["github"]);
   assert.equal((await f.req("/api/sessions", "POST", {}, m.token)).status, 409);
   await f.app.waitForScan();
+  const denied = await f.req("/api/sessions", "POST", {}, m.token);
+  assert.equal(denied.status, 409);
+  assert.match(denied.data.error, /No enabled tools/);
+  await f.req("/api/admin/policy", "PUT", { disabled: [] });
   assert.equal((await f.req("/api/sessions", "POST", {}, m.token)).status, 201);
   assert.deepEqual(f.created.at(-1).config.toolkits, ["github"]);
   assert.ok(f.pages.every((p) => p.kit === "github"));
@@ -308,6 +312,61 @@ test("reactivating a revoked member refreshes their connected apps", async (t) =
   await f.req(`/api/admin/members/${m.id}/rotate`, "POST");
   await f.app.waitForScan();
   assert.equal((await f.req("/api/admin/tools")).data.items.length, 1);
+});
+
+test("new tools default disabled while saved permissions survive refresh, disconnect and restart", async (t) => {
+  const f = await setup(t);
+  f.connections.set("alice", ["github"]);
+  await f.member("alice");
+  await f.configure();
+  assert.deepEqual((await f.req("/api/admin/status")).data.disabled, [
+    "GITHUB_READ",
+  ]);
+  await f.req("/api/admin/policy", "PUT", { disabled: [] });
+  f.provider.page = async () => ({
+    items: [tool("github"), tool("github", "WRITE")],
+  });
+  await f.refresh();
+  assert.deepEqual((await f.req("/api/admin/status")).data.disabled, [
+    "GITHUB_WRITE",
+  ]);
+  await f.refresh();
+  assert.deepEqual((await f.req("/api/admin/status")).data.disabled, [
+    "GITHUB_WRITE",
+  ]);
+  f.connections.set("alice", []);
+  await f.refresh();
+  await f.restart();
+  f.connections.set("alice", ["github"]);
+  await f.refresh();
+  assert.deepEqual((await f.req("/api/admin/status")).data.disabled, [
+    "GITHUB_WRITE",
+  ]);
+});
+
+test("upgrade preserves existing catalog policy and scan failure does not remember new tools", async (t) => {
+  const f = await setup(t);
+  f.connections.set("alice", ["github"]);
+  await f.member("alice");
+  await f.configure();
+  // Simulate the pre-upgrade store with an enabled existing tool.
+  f.app.store.set("knownToolSlugs", []);
+  f.app.store.set("disabled", []);
+  const oldKnown = f.app.store.get("knownToolSlugs");
+  f.provider.page = async () => ({
+    items: [tool("github", "WRITE")],
+    next_cursor: "repeat",
+  });
+  await f.refresh();
+  assert.deepEqual(f.app.store.get("knownToolSlugs"), oldKnown);
+  assert.deepEqual((await f.req("/api/admin/status")).data.disabled, []);
+  f.provider.page = async () => ({
+    items: [tool("github"), tool("github", "WRITE")],
+  });
+  await f.refresh();
+  assert.deepEqual((await f.req("/api/admin/status")).data.disabled, [
+    "GITHUB_WRITE",
+  ]);
 });
 
 test("catalog adapter rejects missing or multi-app scopes before making any request", async () => {

@@ -86,6 +86,11 @@ export async function fixture(t) {
       202,
     );
     await app.waitForScan();
+    // Tests of executable sessions explicitly opt in to the fixture's tools.
+    assert.equal(
+      (await req("/api/admin/policy", "PUT", { disabled: [] })).status,
+      200,
+    );
   }
   async function member(user = "alice") {
     const response = await req("/api/admin/members", "POST", {
