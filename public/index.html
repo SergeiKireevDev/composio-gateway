@@ -188,6 +188,17 @@
             <h2>Members</h2>
             <div id="members-list"></div>
           </div>
+          <div class="card padded">
+            <h2>Active sessions</h2>
+            <p>
+              Revoke an individual session without disabling the member or their
+              other sessions. Tokens are never displayed.
+            </p>
+            <button id="refresh-sessions" class="secondary">
+              Refresh sessions
+            </button>
+            <div id="sessions-list" aria-live="polite"></div>
+          </div>
         </section>
         <section id="settings-tab" class="tab" hidden>
           <div class="page-heading">

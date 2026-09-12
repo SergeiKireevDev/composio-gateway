@@ -218,7 +218,44 @@ async function refreshStatus() {
   }
   render();
 }
+async function sessions() {
+  const credential = admin;
+  const r = await api("/api/admin/sessions");
+  if (!admin || admin !== credential) return;
+  $("sessions-list").replaceChildren();
+  if (!r.items.length) $("sessions-list").textContent = "No active sessions.";
+  for (const s of r.items) {
+    const row = document.createElement("div");
+    row.className = "member-row";
+    const info = document.createElement("div");
+    info.textContent = s.memberName;
+    const details = document.createElement("small");
+    details.textContent = `${s.userId} · Session ${s.id.slice(0, 12)} · Expires ${new Date(s.expiresAt).toLocaleString()}`;
+    info.append(details);
+    const button = document.createElement("button");
+    button.className = "secondary";
+    button.textContent = "Revoke session";
+    button.addEventListener(
+      "click",
+      handle(async () => {
+        button.disabled = true;
+        try {
+          await api(`/api/admin/sessions/${s.id}/revoke`, { method: "POST" });
+          await sessions();
+          notify("Session revoked. Other sessions are unchanged.");
+        } catch (e) {
+          button.disabled = false;
+          throw e;
+        }
+      }),
+    );
+    row.append(info, button);
+    $("sessions-list").append(row);
+  }
+}
+$("refresh-sessions").addEventListener("click", handle(sessions));
 async function members() {
+  await sessions();
   const r = await api("/api/admin/members");
   $("members-list").replaceChildren();
   if (!r.items.length) {
@@ -288,13 +325,20 @@ $("logout").addEventListener("click", () => {
   $("login").hidden = false;
   $("credential-box").hidden = true;
   $("credential-output").textContent = "";
+  $("sessions-list").replaceChildren();
   $("api-key").value = "";
   catalog = [];
   catalogMembers = [];
   status = {};
 });
 for (const e of document.querySelectorAll(".nav"))
-  e.addEventListener("click", () => tab(e.dataset.tab));
+  e.addEventListener(
+    "click",
+    handle(async () => {
+      tab(e.dataset.tab);
+      if (e.dataset.tab === "members") await sessions();
+    }),
+  );
 $("key-form").addEventListener(
   "submit",
   handle(async () => {

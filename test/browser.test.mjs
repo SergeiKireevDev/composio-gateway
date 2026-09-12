@@ -152,6 +152,26 @@ test("browser: connected catalogs, member filters, shared policy, session API, m
   assert.equal(JSON.stringify(session).includes("browser-secret-key"), false);
   assert.equal(calls[0].userId, "user_test");
   assert.deepEqual(calls[0].config.toolkits, ["github"]);
+  await page.locator("#refresh-sessions").click();
+  await expect(page.locator("#sessions-list")).toContainText("GitHub member");
+  await expect(page.locator("#sessions-list")).toContainText("Expires");
+  assert.equal(
+    (await page.locator("#sessions-list").textContent()).includes(
+      session.token,
+    ),
+    false,
+  );
+  await page
+    .getByRole("button", { name: "Revoke session", exact: true })
+    .click();
+  await expect(page.locator("#sessions-list")).toHaveText(
+    "No active sessions.",
+  );
+  const revoked = await page.request.post(new URL("/mcp", page.url()).href, {
+    headers: { Authorization: session.mcp.headers.Authorization },
+    data: { jsonrpc: "2.0", id: 1, method: "ping" },
+  });
+  assert.equal(revoked.status(), 401);
 
   await page.reload();
   await expect(page.locator("#login")).toBeVisible();
