@@ -41,6 +41,22 @@ The key is stored encrypted in the database, as with UI configuration. Removing 
 
 ## Request a session
 
+### Through MCP
+
+Configure an HTTP MCP connection to `https://gateway.example.com/mcp` with
+`Authorization: Bearer <member-token>`. This authenticated connection exposes
+only **`GATEWAY_CREATE_SESSION`**. Call it with `{}` to obtain the same session
+connection details as the REST endpoint below.
+
+Use the returned `mcp.url` and session Authorization header for a separate MCP
+connection that accesses Composio tools. The member-authenticated connection
+cannot execute those tools directly. Keep both credentials private. Session
+creation obeys the same saved permissions, member identity, expiry, onboarding,
+and active-session limit as REST. Policy changes do not disable this local
+bootstrap tool; revoked or rotated member credentials stop authenticating.
+
+### Through REST (unchanged)
+
 ```sh
 curl https://gateway.example.com/api/sessions \
   -H "Authorization: Bearer $GATEWAY_MEMBER_TOKEN" \
@@ -63,7 +79,7 @@ Example response:
 }
 ```
 
-Set `PUBLIC_URL` to obtain an absolute MCP URL in API responses. Without it, the API returns `/mcp`; the admin interface resolves this against its current origin. Do not use the member credential as an MCP session token. Request a new session on expiry or revocation. Oyster's automatic refresh integration is outside this standalone gateway; an API client must request and install the replacement connection.
+Set `PUBLIC_URL` to obtain an absolute MCP URL in session responses. Without it, resolve the returned `/mcp` against the gateway origin. A member credential authenticates the session-creation tool, not Composio tool execution. Request a new session on expiry or revocation using MCP or REST. Automatic connection replacement remains the client's responsibility.
 
 A session lasts one hour by default. There are at most ten unexpired sessions per member. To release one early:
 

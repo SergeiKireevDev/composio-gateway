@@ -431,9 +431,8 @@ export function createGateway({
         }
         throw fail(404, "Not found.");
       }
-      if (method === "POST" && path === "/api/sessions") {
-        const m = member(req),
-          b = await body(req);
+      async function createSession(b) {
+        const m = member(req);
         if (Object.keys(b).length)
           throw fail(
             400,
@@ -532,10 +531,117 @@ export function createGateway({
             },
           };
         });
-        send(res, 201, result);
+        return result;
+      }
+      if (method === "POST" && path === "/api/sessions") {
+        send(res, 201, await createSession(await body(req)));
         return;
       }
       if (path === "/mcp") {
+        // Member credentials expose only the local session-creation tool.
+        // They never authorize forwarding or execution of upstream tools.
+        if (
+          db
+            .prepare("SELECT id FROM members WHERE active=1 AND token_hash=?")
+            .get(hash(bearer(req)))
+        ) {
+          member(req);
+          if (method !== "POST") {
+            res.setHeader("Allow", "POST");
+            throw fail(405, "Use POST for MCP requests.");
+          }
+          const b = await body(req);
+          const reply = (result) =>
+            send(res, 200, { jsonrpc: "2.0", id: b.id, result });
+          const error = (code, message) =>
+            send(res, 200, {
+              jsonrpc: "2.0",
+              id: b.id ?? null,
+              error: { code, message },
+            });
+          if (
+            b.jsonrpc !== "2.0" ||
+            typeof b.method !== "string" ||
+            (b.id !== undefined &&
+              typeof b.id !== "string" &&
+              typeof b.id !== "number")
+          ) {
+            error(-32600, "Invalid Request");
+          } else if (b.id === undefined) {
+            // Notifications never execute tools and require no JSON-RPC response.
+            res.writeHead(202);
+            res.end();
+          } else if (b.method === "initialize") {
+            const versions = ["2024-11-05", "2025-03-26", "2025-06-18"];
+            reply({
+              protocolVersion: versions.includes(b.params?.protocolVersion)
+                ? b.params.protocolVersion
+                : "2025-03-26",
+              capabilities: { tools: {} },
+              serverInfo: { name: "composio-gateway", version: "0.1.0" },
+              instructions:
+                "Call GATEWAY_CREATE_SESSION, then connect using the returned MCP URL and session bearer token to access Composio tools.",
+            });
+          } else if (b.method === "ping") {
+            reply({});
+          } else if (b.method === "tools/list") {
+            reply({
+              tools: [
+                {
+                  name: "GATEWAY_CREATE_SESSION",
+                  description:
+                    "Create an expiring Composio MCP session for the authenticated member. Returns the MCP URL and secret session bearer token; keep it private. Permissions and identity are controlled by the administrator.",
+                  inputSchema: {
+                    type: "object",
+                    properties: {},
+                    additionalProperties: false,
+                  },
+                  annotations: {
+                    readOnlyHint: false,
+                    destructiveHint: false,
+                    idempotentHint: false,
+                    openWorldHint: true,
+                  },
+                },
+              ],
+            });
+          } else if (b.method === "tools/call") {
+            const args = b.params?.arguments ?? {};
+            if (b.params?.name !== "GATEWAY_CREATE_SESSION") {
+              error(-32602, "Unknown tool.");
+            } else if (
+              typeof args !== "object" ||
+              Array.isArray(args) ||
+              Object.keys(args).length
+            ) {
+              error(
+                -32602,
+                "Send empty tool arguments; identity and permissions are administrator-controlled.",
+              );
+            } else {
+              try {
+                const result = await createSession(args);
+                reply({
+                  content: [{ type: "text", text: JSON.stringify(result) }],
+                  structuredContent: result,
+                });
+              } catch (e) {
+                reply({
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: e.status ? e.message : "Session creation failed.",
+                    },
+                  ],
+                });
+              }
+            }
+          } else {
+            error(-32601, "Method not found.");
+          }
+          return;
+        }
         const s = session(req);
         if (method === "DELETE") {
           await serialize(() => {
