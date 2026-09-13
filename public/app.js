@@ -2,13 +2,11 @@ const $ = (id) => document.getElementById(id);
 let admin = "",
   catalog = [],
   catalogMembers = [],
-  disabled = new Set(),
-  saved = new Set(),
   page = 0,
   status = {},
   poll,
   toastTimer,
-  busy = false;
+  requestPoll;
 const size = 40;
 function notify(message, error = false) {
   $("message").textContent = message;
@@ -54,21 +52,10 @@ function tab(name) {
     .querySelectorAll(".nav")
     .forEach((e) => e.classList.toggle("active", e.dataset.tab === name));
   $("breadcrumb").textContent = {
-    tools: "Tool permissions",
+    tools: "Tools & requests",
     members: "Members & sessions",
     settings: "Connection",
   }[name];
-}
-function dirty() {
-  return (
-    disabled.size !== saved.size || [...disabled].some((s) => !saved.has(s))
-  );
-}
-function requireSavedPolicy() {
-  if (dirty())
-    throw new Error(
-      "Save or discard your permission changes before syncing or changing members.",
-    );
 }
 function memberCatalog() {
   const selected = $("catalog-member").value;
@@ -91,14 +78,11 @@ function appOptions() {
 }
 function filtered() {
   const q = $("search").value.toLowerCase(),
-    kit = $("toolkit").value,
-    filter = $("filter").value;
+    kit = $("toolkit").value;
   return memberCatalog().filter(
     (t) =>
       (!kit || t.toolkit === kit) &&
-      (!q ||
-        `${t.name} ${t.slug} ${t.description}`.toLowerCase().includes(q)) &&
-      (filter === "all" || (filter === "disabled") === disabled.has(t.slug)),
+      (!q || `${t.name} ${t.slug} ${t.description}`.toLowerCase().includes(q)),
   );
 }
 function render() {
@@ -106,13 +90,9 @@ function render() {
   page = Math.max(0, Math.min(page, Math.ceil(all.length / size) - 1));
   const scoped = memberCatalog();
   $("total").textContent = scoped.length.toLocaleString();
-  const n = scoped.filter((t) => disabled.has(t.slug)).length;
-  $("disabled-count").textContent = n.toLocaleString();
-  $("enabled-count").textContent = (scoped.length - n).toLocaleString();
   $("result-count").textContent = all.length.toLocaleString();
   $("showing").textContent =
     `${all.length.toLocaleString()} tools match your filters`;
-  $("save-bar").hidden = !dirty();
   $("previous").disabled = page === 0;
   $("next").disabled = (page + 1) * size >= all.length;
   $("page-number").textContent =
@@ -150,31 +130,13 @@ function render() {
       el.textContent = text;
       info.append(el);
     }
-    const label = document.createElement("label");
-    label.className = "toggle";
-    const txt = document.createElement("span");
-    txt.textContent = disabled.has(t.slug) ? "Disabled" : "Enabled";
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = !disabled.has(t.slug);
-    input.disabled = busy || !!status.scan?.running;
-    input.setAttribute("aria-label", `Enable ${t.slug}`);
-    input.addEventListener("change", () => {
-      input.checked ? disabled.delete(t.slug) : disabled.add(t.slug);
-      render();
-    });
-    const track = document.createElement("span");
-    track.className = "track";
-    label.append(txt, input, track);
-    row.append(icon, info, label);
+    row.append(icon, info);
     $("tools-list").append(row);
   }
 }
 async function loadCatalog() {
   const r = await api("/api/admin/tools");
   catalog = r.items;
-  saved = new Set(status.disabled);
-  disabled = new Set(saved);
   catalogMembers = r.members;
   const selected = $("catalog-member").value;
   $("catalog-member").replaceChildren(new Option("All active members", ""));
@@ -218,6 +180,81 @@ async function refreshStatus() {
   }
   render();
 }
+async function sessionRequests() {
+  clearTimeout(requestPoll);
+  const credential = admin;
+  try {
+    const r = await api("/api/admin/session-requests");
+    if (!admin || admin !== credential) return;
+    $("requests-list").replaceChildren();
+    if (!r.items.length)
+      $("requests-list").textContent = "No session requests.";
+    for (const request of r.items) {
+      const row = document.createElement("div");
+      row.className = "request-row";
+      row.dataset.requestId = request.request_id;
+      const title = document.createElement("h3");
+      title.textContent = `${request.member_name} · ${request.status}`;
+      const info = document.createElement("p");
+      info.textContent = `${request.user_id} · Request ${request.request_id} · Expires ${new Date(request.expires_at).toLocaleString()}`;
+      const reason = document.createElement("p");
+      reason.textContent = request.reason || "No reason provided.";
+      const details = document.createElement("details");
+      details.open = request.status === "pending";
+      const summary = document.createElement("summary");
+      summary.textContent = request.tools.length
+        ? `${request.tools.length} requested tools`
+        : "Connection management only — no execution tools";
+      const list = document.createElement("ul");
+      for (const slug of request.tools) {
+        const item = document.createElement("li"),
+          tool = catalog.find((t) => t.slug === slug);
+        item.textContent = tool
+          ? `${slug} — ${tool.name}: ${tool.description}`
+          : slug;
+        list.append(item);
+      }
+      details.append(summary, list);
+      row.append(title, info, reason, details);
+      if (request.status === "pending") {
+        for (const action of ["approve", "reject"]) {
+          const button = document.createElement("button");
+          button.className = "secondary";
+          button.textContent =
+            action === "approve" ? "Approve request" : "Reject request";
+          button.addEventListener(
+            "click",
+            handle(async () => {
+              for (const b of row.querySelectorAll("button")) b.disabled = true;
+              try {
+                await api(
+                  `/api/admin/session-requests/${request.request_id}/${action}`,
+                  { method: "POST" },
+                );
+                notify(
+                  action === "approve"
+                    ? "Approved. The member can now collect one session."
+                    : "Request rejected.",
+                );
+              } finally {
+                await sessionRequests();
+              }
+            }),
+          );
+          row.append(button);
+        }
+      }
+      $("requests-list").append(row);
+    }
+  } finally {
+    if (admin && admin === credential)
+      requestPoll = setTimeout(
+        () => sessionRequests().catch((e) => notify(e.message, true)),
+        5000,
+      );
+  }
+}
+$("refresh-requests").addEventListener("click", handle(sessionRequests));
 async function sessions() {
   const credential = admin;
   const r = await api("/api/admin/sessions");
@@ -232,6 +269,11 @@ async function sessions() {
     const details = document.createElement("small");
     details.textContent = `${s.userId} · Session ${s.id.slice(0, 12)} · Expires ${new Date(s.expiresAt).toLocaleString()}`;
     info.append(details);
+    const tools = document.createElement("small");
+    tools.textContent = s.tools?.length
+      ? `Approved tools: ${s.tools.join(", ")}`
+      : "Connection management only";
+    info.append(tools);
     const button = document.createElement("button");
     button.className = "secondary";
     button.textContent = "Revoke session";
@@ -279,7 +321,6 @@ async function members() {
       b.addEventListener(
         "click",
         handle(async () => {
-          requireSavedPolicy();
           const r = await api(`/api/admin/members/${m.id}/${action}`, {
             method: "POST",
           });
@@ -312,6 +353,7 @@ $("login-form").addEventListener(
     await refreshStatus();
     await loadCatalog();
     await members();
+    await sessionRequests();
     $("admin-token").value = "";
     $("login").hidden = true;
     $("workspace").hidden = false;
@@ -321,6 +363,8 @@ $("login-form").addEventListener(
 $("logout").addEventListener("click", () => {
   admin = "";
   clearTimeout(poll);
+  clearTimeout(requestPoll);
+  $("requests-list").replaceChildren();
   $("workspace").hidden = true;
   $("login").hidden = false;
   $("credential-box").hidden = true;
@@ -337,6 +381,7 @@ for (const e of document.querySelectorAll(".nav"))
     handle(async () => {
       tab(e.dataset.tab);
       if (e.dataset.tab === "members") await sessions();
+      if (e.dataset.tab === "tools") await sessionRequests();
     }),
   );
 $("key-form").addEventListener(
@@ -355,7 +400,6 @@ $("key-form").addEventListener(
 $("refresh").addEventListener(
   "click",
   handle(async () => {
-    requireSavedPolicy();
     await api("/api/admin/refresh", { method: "POST" });
     await refreshStatus();
   }),
@@ -365,7 +409,7 @@ $("catalog-member").addEventListener("change", () => {
   appOptions();
   render();
 });
-for (const id of ["search", "toolkit", "filter"])
+for (const id of ["search", "toolkit"])
   $(id).addEventListener(id === "search" ? "input" : "change", () => {
     page = 0;
     render();
@@ -378,47 +422,9 @@ $("next").addEventListener("click", () => {
   page++;
   render();
 });
-$("enable-visible").addEventListener("click", () => {
-  if (busy || status.scan?.running) return;
-  for (const t of filtered()) disabled.delete(t.slug);
-  render();
-});
-$("disable-visible").addEventListener("click", () => {
-  if (busy || status.scan?.running) return;
-  for (const t of filtered()) disabled.add(t.slug);
-  render();
-});
-$("discard").addEventListener("click", () => {
-  if (busy) return;
-  disabled = new Set(saved);
-  render();
-});
-$("save").addEventListener(
-  "click",
-  handle(async () => {
-    if (busy || status.scan?.running) return;
-    busy = true;
-    $("save").disabled = true;
-    const snapshot = [...disabled];
-    render();
-    try {
-      await api("/api/admin/policy", {
-        method: "PUT",
-        body: { disabled: snapshot },
-      });
-      saved = new Set(snapshot);
-      notify("Permissions saved. Existing sessions revoked.");
-    } finally {
-      busy = false;
-      $("save").disabled = false;
-      render();
-    }
-  }),
-);
 $("member-form").addEventListener(
   "submit",
   handle(async () => {
-    requireSavedPolicy();
     const r = await api("/api/admin/members", {
       method: "POST",
       body: { name: $("member-name").value, userId: $("user-id").value },
@@ -440,10 +446,4 @@ $("copy-credential").addEventListener(
 $("dismiss-credential").addEventListener("click", () => {
   $("credential-output").textContent = "";
   $("credential-box").hidden = true;
-});
-window.addEventListener("beforeunload", (e) => {
-  if (dirty()) {
-    e.preventDefault();
-    e.returnValue = "";
-  }
 });

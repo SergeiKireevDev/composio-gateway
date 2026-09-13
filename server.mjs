@@ -7,6 +7,7 @@ import { openStore, token, hash } from "./store.mjs";
 import { createAdminAuthenticator } from "./admin-auth.mjs";
 import { createProvider } from "./composio.mjs";
 import { discoveryTools, discover } from "./discovery.mjs";
+import { createSessionRequests, requestTools } from "./session-requests.mjs";
 const root = fileURLToPath(new URL(".", import.meta.url));
 const fail = (status, message) => Object.assign(new Error(message), { status });
 function textField(v, label, max = 200) {
@@ -92,6 +93,7 @@ export function createGateway({
   // Validate credentials before opening SQLite or creating an encryption key.
   const store = openStore(dataDir),
     { db } = store;
+  const requests = createSessionRequests(store, now);
   let scan = { running: false, count: 0, error: null },
     mutations = Promise.resolve(),
     scanTask = Promise.resolve(),
@@ -136,6 +138,11 @@ export function createGateway({
       store.set("epoch", store.get("epoch", 0) + 1);
     }
     if (store.get("apiKey")) cleanup(rows, key());
+  }
+  // Existing sessions were issued under the old global-toggle policy.
+  if (store.get("sessionApprovalVersion") !== 1) {
+    revoke();
+    store.set("sessionApprovalVersion", 1);
   }
   function catalogMembers() {
     const connected = store.get("catalogConnections", {});
@@ -364,23 +371,26 @@ export function createGateway({
           return;
         }
         if (method === "PUT" && path === "/api/admin/policy") {
-          const b = await body(req);
-          await serialize(() =>
-            store.transaction(() => {
-              const known = new Set([
-                ...catalog().map((t) => t.slug),
-                ...store.get("disabled", []),
-              ]);
-              if (
-                !Array.isArray(b.disabled) ||
-                b.disabled.some((s) => typeof s !== "string" || !known.has(s))
-              )
-                throw fail(400, "Policy contains unknown tool slugs.");
-              store.set("disabled", [...new Set(b.disabled)]);
-              revoke();
-            }),
+          throw fail(
+            410,
+            "Global tool policy has been replaced by per-session request approval.",
           );
-          send(res, 200, { saved: true });
+        }
+        if (method === "GET" && path === "/api/admin/session-requests") {
+          send(res, 200, { items: requests.list() });
+          return;
+        }
+        const reviewMatch = path.match(
+          /^\/api\/admin\/session-requests\/([a-zA-Z0-9-]+)\/(approve|reject)$/,
+        );
+        if (method === "POST" && reviewMatch) {
+          const result = await serialize(() =>
+            requests.review(
+              reviewMatch[1],
+              reviewMatch[2] === "approve" ? "approved" : "rejected",
+            ),
+          );
+          send(res, 200, result);
           return;
         }
         if (method === "GET" && path === "/api/admin/sessions") {
@@ -399,6 +409,8 @@ export function createGateway({
               memberName: row.name,
               userId: row.user_id,
               expiresAt: new Date(row.expires).toISOString(),
+              tools: store.unseal(row.upstream).allowedTools || [],
+              requestId: store.unseal(row.upstream).approvalId || null,
             })),
           });
           return;
@@ -475,11 +487,32 @@ export function createGateway({
       }
       async function createSession(b) {
         const m = member(req);
-        if (Object.keys(b).length)
+        if (!b || typeof b !== "object" || Array.isArray(b))
+          throw fail(400, "Expected an arguments object.");
+        const collecting = Object.hasOwn(b, "request_id");
+        if (collecting) {
+          if (
+            Object.keys(b).length !== 1 ||
+            typeof b.request_id !== "string" ||
+            b.request_id.length > 128
+          )
+            throw fail(
+              400,
+              "Collect with request_id only; approved tools cannot be changed.",
+            );
+        } else if (
+          Object.keys(b).some((k) => !["tools", "reason"].includes(k)) ||
+          !Array.isArray(b.tools) ||
+          b.tools.length > 100 ||
+          b.tools.some((s) => typeof s !== "string" || !s || s.length > 200) ||
+          (b.reason !== undefined &&
+            (typeof b.reason !== "string" || b.reason.length > 1000))
+        ) {
           throw fail(
             400,
-            "Session options are controlled by the administrator. Send an empty object.",
+            "Request tools (0–100 exact slugs) and an optional reason (up to 1000 characters), or collect with request_id.",
           );
+        }
         const result = await serialize(async () => {
           if (
             !db
@@ -489,6 +522,11 @@ export function createGateway({
               .get(m.id, m.token_hash)
           )
             throw fail(401, "Member revoked.");
+          const approved = collecting ? requests.get(b.request_id, m) : null;
+          if (approved && approved.status !== "approved") return approved;
+          const requested = approved
+            ? approved.tools
+            : [...new Set(b.tools)].sort();
           const apiKey = key();
           let connected;
           try {
@@ -509,7 +547,14 @@ export function createGateway({
               "Connected apps changed. Catalog refresh started; retry after it completes.",
             );
           }
-          const onboarding = !connected.size;
+          const available = catalog().filter((t) => connected.has(t.toolkit));
+          if (requested.some((slug) => !available.some((t) => t.slug === slug)))
+            throw fail(
+              400,
+              "A requested tool is unavailable in this member's connected-app catalog. Search again and submit a new request.",
+            );
+          if (!collecting) return requests.create(m, requested, b.reason || "");
+          const onboarding = !requested.length;
           // Do not restrict connection discovery to already-connected toolkits.
           // Execution is denied locally for onboarding sessions.
           const config = onboarding
@@ -520,8 +565,8 @@ export function createGateway({
                 manageConnections: { enable: true },
               }
             : policyConfig(
-                catalog().filter((t) => connected.has(t.toolkit)),
-                store.get("disabled", []),
+                available.filter((t) => requested.includes(t.slug)),
+                [],
               );
           const current = db
             .prepare(
@@ -540,22 +585,34 @@ export function createGateway({
               (t) => t.enable,
             );
             up.onboarding = onboarding;
+            up.approvalId = approved.request_id;
           } catch {
             throw fail(
               502,
-              "Composio session creation failed. Check the configured key and tool policy.",
+              "Composio session creation failed. Check the configured key and approved tools.",
             );
           }
           const credential = token(),
             expires = now() + ttl * 1000;
-          db.prepare("INSERT INTO sessions VALUES(?,?,?,?,?)").run(
-            hash(credential),
-            m.id,
-            store.get("epoch", 0),
-            expires,
-            store.seal(up),
-          );
+          try {
+            store.transaction(() => {
+              requests.consume(approved.request_id, m);
+              db.prepare("INSERT INTO sessions VALUES(?,?,?,?,?)").run(
+                hash(credential),
+                m.id,
+                store.get("epoch", 0),
+                expires,
+                store.seal(up),
+              );
+            });
+          } catch (e) {
+            cleanup([{ upstream: store.seal(up) }], apiKey);
+            throw e;
+          }
           return {
+            request_id: approved.request_id,
+            status: "issued",
+            tools: requested,
             token: credential,
             token_type: "Bearer",
             mode: onboarding ? "onboarding" : "connected",
@@ -576,7 +633,19 @@ export function createGateway({
         return result;
       }
       if (method === "POST" && path === "/api/sessions") {
-        send(res, 201, await createSession(await body(req)));
+        const result = await createSession(await body(req));
+        send(
+          res,
+          result.token ? 201 : result.status === "pending" ? 202 : 200,
+          result,
+        );
+        return;
+      }
+      const requestMatch = path.match(
+        /^\/api\/session-requests\/([a-zA-Z0-9-]+)$/,
+      );
+      if (method === "GET" && requestMatch) {
+        send(res, 200, requests.get(requestMatch[1], member(req)));
         return;
       }
       if (path === "/mcp") {
@@ -622,31 +691,13 @@ export function createGateway({
               capabilities: { tools: {} },
               serverInfo: { name: "composio-gateway", version: "0.1.0" },
               instructions:
-                "Use COMPOSIO_SEARCH_TOOLS and COMPOSIO_GET_TOOL_SCHEMAS for read-only connected-app discovery without a session token. Call GATEWAY_CREATE_SESSION for execution access using the saved administrator policy.",
+                "Use COMPOSIO_SEARCH_TOOLS and COMPOSIO_GET_TOOL_SCHEMAS for read-only connected-app discovery without a session token. Submit tools with GATEWAY_CREATE_SESSION for admin approval, poll GATEWAY_GET_SESSION_REQUEST, then collect the approved session using request_id. No execution is allowed before approval.",
             });
           } else if (b.method === "ping") {
             reply({});
           } else if (b.method === "tools/list") {
             reply({
-              tools: [
-                ...discoveryTools,
-                {
-                  name: "GATEWAY_CREATE_SESSION",
-                  description:
-                    "Create an expiring Composio MCP session for the authenticated member. Returns the MCP URL and secret session bearer token; keep it private. Permissions and identity are controlled by the administrator.",
-                  inputSchema: {
-                    type: "object",
-                    properties: {},
-                    additionalProperties: false,
-                  },
-                  annotations: {
-                    readOnlyHint: false,
-                    destructiveHint: false,
-                    idempotentHint: false,
-                    openWorldHint: true,
-                  },
-                },
-              ],
+              tools: [...discoveryTools, ...requestTools],
             });
           } else if (b.method === "tools/call") {
             const args = b.params?.arguments ?? {};
@@ -690,20 +741,23 @@ export function createGateway({
                   ],
                 });
               }
-            } else if (b.params?.name !== "GATEWAY_CREATE_SESSION") {
+            } else if (!requestTools.some((t) => t.name === b.params?.name)) {
               error(-32602, "Unknown tool.");
-            } else if (
-              typeof args !== "object" ||
-              Array.isArray(args) ||
-              Object.keys(args).length
-            ) {
-              error(
-                -32602,
-                "Send empty tool arguments; identity and permissions are administrator-controlled.",
-              );
             } else {
               try {
-                const result = await createSession(args);
+                if (
+                  b.params.name === "GATEWAY_GET_SESSION_REQUEST" &&
+                  (!args ||
+                    typeof args !== "object" ||
+                    Array.isArray(args) ||
+                    Object.keys(args).length !== 1 ||
+                    typeof args.request_id !== "string")
+                )
+                  throw fail(400, "Provide request_id only.");
+                const result =
+                  b.params.name === "GATEWAY_GET_SESSION_REQUEST"
+                    ? requests.get(args.request_id, member(req))
+                    : await createSession(args);
                 reply({
                   content: [{ type: "text", text: JSON.stringify(result) }],
                   structuredContent: result,
@@ -772,20 +826,25 @@ export function createGateway({
           const sessionTools = new Set(
             store.unseal(s.upstream).allowedTools || [],
           );
-          const denied = new Set(store.get("disabled", []));
           const allowed = new Set(
             catalog()
-              .filter((t) => !denied.has(t.slug) && sessionTools.has(t.slug))
+              .filter((t) => sessionTools.has(t.slug))
               .map((t) => t.slug),
           );
           if (!meta.includes(name) && !allowed.has(name))
-            throw fail(403, "Tool is disabled or unavailable.");
+            throw fail(
+              403,
+              "Tool is not approved for this session or is unavailable.",
+            );
           if (name === "COMPOSIO_MULTI_EXECUTE_TOOL") {
             const batch = b.params?.arguments?.tools;
             if (!Array.isArray(batch) || batch.length < 1 || batch.length > 50)
               throw fail(400, "Expected 1–50 tools.");
             if (batch.some((t) => !allowed.has(t?.tool_slug)))
-              throw fail(403, "Batch contains a disabled or unavailable tool.");
+              throw fail(
+                403,
+                "Batch contains a tool not approved for this session or unavailable.",
+              );
           }
         }
         session(req);

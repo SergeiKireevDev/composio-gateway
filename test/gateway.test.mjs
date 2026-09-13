@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGateway } from "../server.mjs";
 import { createProvider } from "../composio.mjs";
+import { issueSession } from "../test-support/issue-session.mjs";
+import { hash } from "../store.mjs";
 const items = [
   {
     slug: "GMAIL_FETCH_EMAILS",
@@ -23,9 +25,9 @@ test("admin can list and revoke one session without exposing credentials or revo
   await f.setup();
   const alice = await f.member("alice");
   const bob = await f.member("bob");
-  const first = (await f.req("/api/sessions", "POST", {}, alice.token)).data;
-  const second = (await f.req("/api/sessions", "POST", {}, alice.token)).data;
-  const third = (await f.req("/api/sessions", "POST", {}, bob.token)).data;
+  const first = (await f.issue(alice.token)).data;
+  const second = (await f.issue(alice.token)).data;
+  const third = (await f.issue(bob.token)).data;
   const listed = await f.req("/api/admin/sessions");
   assert.equal(listed.status, 200);
   assert.equal(listed.data.items.length, 3);
@@ -69,10 +71,7 @@ test("admin can list and revoke one session without exposing credentials or revo
     (await f.req(`/api/admin/sessions/${id}/revoke`, "POST")).status,
     404,
   );
-  assert.equal(
-    (await f.req("/api/sessions", "POST", {}, bob.token)).status,
-    201,
-  );
+  assert.equal((await f.issue(bob.token)).status, 201);
   assert.equal(f.calls.remove.length, 1);
   f.advance(3600001);
   assert.deepEqual((await f.req("/api/admin/sessions")).data.items, []);
@@ -82,7 +81,7 @@ test("individual admin revocation aborts an in-flight MCP request", async (t) =>
   const f = await fixture(t);
   await f.setup();
   const m = await f.member();
-  const issued = (await f.req("/api/sessions", "POST", {}, m.token)).data;
+  const issued = (await f.issue(m.token)).data;
   const id = (await f.req("/api/admin/sessions")).data.items[0].id;
   let entered,
     aborted = false;
@@ -129,11 +128,18 @@ test("member MCP authenticates, lists discovery and session creation, and return
       "COMPOSIO_SEARCH_TOOLS",
       "COMPOSIO_GET_TOOL_SCHEMAS",
       "GATEWAY_CREATE_SESSION",
+      "GATEWAY_GET_SESSION_REQUEST",
     ],
   );
+  const pending = await rpc("tools/call", {
+    name: "GATEWAY_CREATE_SESSION",
+    arguments: { tools: ["GITHUB_DELETE_REPO"] },
+  });
+  const request_id = pending.data.result.structuredContent.request_id;
+  await f.req(`/api/admin/session-requests/${request_id}/approve`, "POST");
   const created = await rpc("tools/call", {
     name: "GATEWAY_CREATE_SESSION",
-    arguments: {},
+    arguments: { request_id },
   });
   const session = created.data.result.structuredContent;
   assert.deepEqual(JSON.parse(created.data.result.content[0].text), session);
@@ -171,7 +177,9 @@ test("member MCP rejects execution, identity overrides, invalid credentials and 
       { jsonrpc: "2.0", id: 1, method: "tools/call", params },
       m.token,
     );
-    assert.equal(r.data.error.code, -32602);
+    if (params.name === "COMPOSIO_MULTI_EXECUTE_TOOL")
+      assert.equal(r.data.error.code, -32602);
+    else assert.equal(r.data.result.isError, true);
   }
   for (const credential of ["invalid-token", "admin-test"]) {
     assert.equal(
@@ -202,7 +210,7 @@ test("member MCP rejects execution, identity overrides, invalid credentials and 
   assert.equal(f.calls.forward.length, 0);
 });
 
-test("member MCP honors tool policy, onboarding, notifications and session limits", async (t) => {
+test("member MCP honors approval requirements, onboarding, notifications and session limits", async (t) => {
   const f = await fixture(t);
   await f.setup();
   const m = await f.member();
@@ -228,15 +236,15 @@ test("member MCP honors tool policy, onboarding, notifications and session limit
   });
   const denied = await f.req("/mcp", "POST", b, m.token);
   assert.equal(denied.data.result.isError, true);
-  assert.match(denied.data.result.content[0].text, /No enabled tools/);
+  assert.match(denied.data.result.content[0].text, /Request tools/);
   f.provider.connectedToolkits = async () => [];
   for (let i = 0; i < 10; i++) {
-    const r = await f.req("/mcp", "POST", b, m.token);
-    assert.equal(r.data.result.structuredContent.mode, "onboarding");
+    const r = await f.issue(m.token, []);
+    assert.equal(r.data.mode, "onboarding");
   }
-  const limited = await f.req("/mcp", "POST", b, m.token);
-  assert.equal(limited.data.result.isError, true);
-  assert.match(limited.data.result.content[0].text, /Maximum 10/);
+  const limited = await f.issue(m.token, []);
+  assert.equal(limited.status, 429);
+  assert.match(limited.data.error, /Maximum 10/);
 });
 
 test("member discovery works with every tool disabled and never creates or forwards an execution session", async (t) => {
@@ -439,11 +447,6 @@ export async function fixture(t) {
       202,
     );
     await app.waitForScan();
-    // Tests of executable sessions explicitly opt in to the fixture's tools.
-    assert.equal(
-      (await req("/api/admin/policy", "PUT", { disabled: [] })).status,
-      200,
-    );
   }
   async function member(user = "alice") {
     const response = await req("/api/admin/members", "POST", {
@@ -460,6 +463,26 @@ export async function fixture(t) {
   return {
     app,
     req,
+    async issue(credential, tools) {
+      if (!tools) {
+        const m = app.store.db
+          .prepare("SELECT user_id FROM members WHERE token_hash=?")
+          .get(hash(credential));
+        let kits;
+        try {
+          kits = await provider.connectedToolkits(
+            "secret-project-key",
+            m?.user_id,
+          );
+        } catch {
+          kits = ["gmail", "github"];
+        }
+        tools = items
+          .filter((t) => kits.includes(t.toolkit.slug))
+          .map((t) => t.slug);
+      }
+      return issueSession(req, credential, tools);
+    },
     setup,
     member,
     calls,
@@ -479,7 +502,7 @@ test("sessions restrict tools to each member's active services and fail closed",
     ["bob", "github"],
   ]) {
     const m = await f.member(user);
-    const session = await f.req("/api/sessions", "POST", {}, m.token);
+    const session = await f.issue(m.token);
     assert.equal(session.status, 201);
     assert.deepEqual(f.calls.create.at(-1).config.toolkits, [toolkit]);
     const denied =
@@ -503,7 +526,7 @@ test("sessions restrict tools to each member's active services and fail closed",
   }
   const m = await f.member("empty");
   f.provider.connectedToolkits = async () => [];
-  const onboarding = await f.req("/api/sessions", "POST", {}, m.token);
+  const onboarding = await f.issue(m.token);
   assert.equal(onboarding.status, 201);
   assert.equal(onboarding.data.mode, "onboarding");
   assert.deepEqual(f.calls.create.at(-1).config.preload, { tools: [] });
@@ -584,13 +607,13 @@ test("sessions restrict tools to each member's active services and fail closed",
     );
   }
   f.provider.connectedToolkits = async () => ["gmail"];
-  const connected = await f.req("/api/sessions", "POST", {}, m.token);
+  const connected = await f.issue(m.token);
   assert.equal(connected.data.mode, "connected");
   assert.deepEqual(f.calls.create.at(-1).config.toolkits, ["gmail"]);
   f.provider.connectedToolkits = async () => {
     throw Error("unavailable");
   };
-  assert.equal((await f.req("/api/sessions", "POST", {}, m.token)).status, 502);
+  assert.equal((await f.issue(m.token)).status, 502);
 });
 test("catalog paginates, encrypts secrets and preserves working config on failed scan", async (t) => {
   const f = await fixture(t);
@@ -645,10 +668,7 @@ test("issued credentials hide project key and bind allowlist to authenticated us
   const f = await fixture(t);
   await f.setup();
   const m = await f.member();
-  await f.req("/api/admin/policy", "PUT", {
-    disabled: ["GITHUB_DELETE_REPO", "GMAIL_SEND_EMAIL"],
-  });
-  const s = await f.req("/api/sessions", "POST", {}, m.token);
+  const s = await f.issue(m.token, ["GMAIL_FETCH_EMAILS"]);
   assert.equal(s.status, 201);
   assert.equal(s.data.mcp.url, "https://gateway.test/mcp");
   assert.equal(JSON.stringify(s.data).includes("secret-project-key"), false);
@@ -701,16 +721,16 @@ test("issued credentials hide project key and bind allowlist to authenticated us
   batch.params.arguments.tools[0].tool_slug = "GMAIL_FETCH_EMAILS";
   assert.equal((await f.req("/mcp", "POST", batch, s.data.token)).status, 200);
 });
-test("policy saves, member revocation, credential rotation and expiry invalidate sessions", async (t) => {
+test("catalog changes, member revocation, credential rotation and expiry invalidate sessions", async (t) => {
   const f = await fixture(t);
   await f.setup();
   const m = await f.member();
-  const issue = async (token) =>
-    (await f.req("/api/sessions", "POST", {}, token)).data.token;
+  const issue = async (token) => (await f.issue(token)).data.token;
   const ping = (token) =>
     f.req("/mcp", "POST", { jsonrpc: "2.0", id: 1, method: "ping" }, token);
   let s = await issue(m.token);
-  await f.req("/api/admin/policy", "PUT", { disabled: ["GMAIL_SEND_EMAIL"] });
+  await f.req("/api/admin/refresh", "POST");
+  await f.app.waitForScan();
   assert.equal((await ping(s)).status, 401);
   s = await issue(m.token);
   f.advance(3600001);
@@ -724,21 +744,21 @@ test("policy saves, member revocation, credential rotation and expiry invalidate
   await f.req(`/api/admin/members/${m.id}/revoke`, "POST");
   assert.equal((await ping(s)).status, 401);
 });
-test("empty policy fails closed and unknown slugs are rejected", async (t) => {
+test("legacy policy cannot bypass approval and empty legacy session payload fails closed", async (t) => {
   const f = await fixture(t);
   await f.setup();
   const m = await f.member();
   assert.equal(
     (await f.req("/api/admin/policy", "PUT", { disabled: ["TYPO"] })).status,
-    400,
+    410,
   );
   await f.req("/api/admin/policy", "PUT", {
     disabled: items.map((i) => i.slug),
   });
-  assert.equal((await f.req("/api/sessions", "POST", {}, m.token)).status, 409);
+  assert.equal((await f.req("/api/sessions", "POST", {}, m.token)).status, 400);
   assert.equal(f.calls.create.length, 0);
 });
-test("policy mutation waits for issuance and then invalidates that session", async (t) => {
+test("member revocation waits for issuance and then invalidates that session", async (t) => {
   const f = await fixture(t);
   await f.setup();
   const m = await f.member();
@@ -750,11 +770,9 @@ test("policy mutation waits for issuance and then invalidates that session", asy
     await new Promise((r) => (release = r));
     return original(...args);
   };
-  const issuing = f.req("/api/sessions", "POST", {}, m.token);
+  const issuing = f.issue(m.token);
   await entered;
-  const saving = f.req("/api/admin/policy", "PUT", {
-    disabled: ["GMAIL_SEND_EMAIL"],
-  });
+  const saving = f.req(`/api/admin/members/${m.id}/revoke`, "POST");
   release();
   const s = await issuing;
   await saving;
@@ -774,7 +792,7 @@ test("invalidating during an upstream request aborts it and never returns its re
   const f = await fixture(t);
   await f.setup();
   const m = await f.member();
-  const s = (await f.req("/api/sessions", "POST", {}, m.token)).data;
+  const s = (await f.issue(m.token)).data;
   let started;
   const entered = new Promise((r) => (started = r));
   f.provider.forward = async (up, b, p, signal) => {
@@ -792,7 +810,7 @@ test("invalidating during an upstream request aborts it and never returns its re
     s.token,
   );
   await entered;
-  await f.req("/api/admin/policy", "PUT", { disabled: [] });
+  await f.req(`/api/admin/members/${m.id}/revoke`, "POST");
   assert.equal((await pending).status, 502);
 });
 test("session caps, deletion and upstream failures are handled without leaking credentials", async (t) => {
@@ -801,10 +819,10 @@ test("session caps, deletion and upstream failures are handled without leaking c
   const m = await f.member();
   let s;
   for (let i = 0; i < 10; i++) {
-    s = await f.req("/api/sessions", "POST", {}, m.token);
+    s = await f.issue(m.token);
     assert.equal(s.status, 201);
   }
-  assert.equal((await f.req("/api/sessions", "POST", {}, m.token)).status, 429);
+  assert.equal((await f.issue(m.token)).status, 429);
   assert.equal(
     (await f.req("/mcp", "DELETE", undefined, s.data.token)).status,
     200,
@@ -812,7 +830,7 @@ test("session caps, deletion and upstream failures are handled without leaking c
   f.provider.create = async () => {
     throw Error("secret-project-key");
   };
-  const failed = await f.req("/api/sessions", "POST", {}, m.token);
+  const failed = await f.issue(m.token);
   assert.equal(failed.status, 502);
   assert.equal(JSON.stringify(failed).includes("secret-project-key"), false);
 });
@@ -874,7 +892,7 @@ test("real SDK sends restricted session config and retains upstream key only ins
   assert.equal(s.headers["x-api-key"], "project-key");
   assert.equal(s.id, "trs_contract");
 });
-test("encrypted connection, policy and credentials survive a server restart", async (t) => {
+test("encrypted connection, approved permissions and credentials survive a server restart", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "gateway-restart-"));
   const provider = {
     async connectedToolkits() {
@@ -923,16 +941,26 @@ test("encrypted connection, policy and credentials survive a server restart", as
   ).json();
   await req("/api/admin/config", "POST", { apiKey: "persisted-secret" });
   await app.waitForScan();
-  await req("/api/admin/policy", "PUT", { disabled: ["GITHUB_DELETE_REPO"] });
-  const session = await (
-    await req("/api/sessions", "POST", {}, m.token)
-  ).json();
+  const issue = () =>
+    issueSession(
+      async (...args) => {
+        const response = await req(...args);
+        return { status: response.status, data: await response.json() };
+      },
+      m.token,
+      ["GMAIL_FETCH_EMAILS"],
+    );
+  const session = (await issue()).data;
   await app.close();
   app = createGateway({ dataDir: dir, adminToken: "restart-admin", provider });
   url = await start();
   const status = await (await req("/api/admin/status", "GET")).json();
   assert.equal(status.configured, true);
-  assert.deepEqual(status.disabled, ["GITHUB_DELETE_REPO"]);
+  const requests = await (
+    await req("/api/admin/session-requests", "GET")
+  ).json();
+  assert.equal(requests.items[0].status, "issued");
+  assert.deepEqual(requests.items[0].tools, ["GMAIL_FETCH_EMAILS"]);
   assert.equal(
     (
       await req(
@@ -944,7 +972,7 @@ test("encrypted connection, policy and credentials survive a server restart", as
     ).status,
     200,
   );
-  assert.equal((await req("/api/sessions", "POST", {}, m.token)).status, 201);
+  assert.equal((await issue()).status, 201);
   assert.equal(
     readFileSync(join(dir, "gateway.sqlite")).includes(
       Buffer.from("persisted-secret"),

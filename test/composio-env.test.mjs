@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createGateway } from "../server.mjs";
+import { issueSession } from "../test-support/issue-session.mjs";
 
 async function fixture(t, composioApiToken) {
   const dir = fs.mkdtempSync(join(tmpdir(), "composio-env-"));
@@ -69,11 +70,7 @@ async function fixture(t, composioApiToken) {
       userId: "alice",
     });
     await app.waitForScan();
-    // Session lifecycle tests explicitly enable the discovered fixture tool.
-    assert.equal(
-      (await req("/api/admin/policy", "PUT", { disabled: [] })).status,
-      200,
-    );
+
     return response.data;
   };
   return {
@@ -81,6 +78,7 @@ async function fixture(t, composioApiToken) {
     provider,
     calls,
     req,
+    issue: (credential) => issueSession(req, credential, ["GITHUB_READ"]),
     member,
     get app() {
       return app;
@@ -107,7 +105,7 @@ test("environment key configures without UI input and never appears in responses
   );
   const m = await f.member();
   assert.deepEqual(f.calls.pages, [{ key: secret, toolkit: "github" }]);
-  const session = await f.req("/api/sessions", "POST", {}, m.token);
+  const session = await f.issue(m.token);
   assert.equal(session.status, 201);
   assert.equal(f.calls.created[0].key, secret);
   assert.equal(JSON.stringify(session).includes(secret), false);
@@ -141,7 +139,7 @@ test("environment ownership blocks UI/API key replacement but allows catalog ref
 test("unchanged environment key preserves scoped catalog and sessions across restart", async (t) => {
   const f = await fixture(t, "same-key");
   const m = await f.member();
-  const session = await f.req("/api/sessions", "POST", {}, m.token);
+  const session = await f.issue(m.token);
   const before = (await f.req("/api/admin/status")).data;
   const count = f.calls.pages.length;
   await f.restart("same-key");
@@ -166,7 +164,7 @@ test("environment key replaces the saved project and revokes sessions even if it
   await f.req("/api/admin/config", "POST", { apiKey: "old-project" });
   await f.app.waitForScan();
   const m = await f.member();
-  const oldSession = await f.req("/api/sessions", "POST", {}, m.token);
+  const oldSession = await f.issue(m.token);
   f.provider.connectedToolkits = async () => {
     throw Error("Composio unavailable");
   };
@@ -191,7 +189,7 @@ test("environment key replaces the saved project and revokes sessions even if it
   f.provider.connectedToolkits = async () => ["github"];
   await f.req("/api/admin/refresh", "POST");
   await f.app.waitForScan();
-  const fresh = await f.req("/api/sessions", "POST", {}, m.token);
+  const fresh = await f.issue(m.token);
   assert.equal(fresh.status, 201);
   assert.equal(f.calls.created.at(-1).key, "new-project");
 });
