@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test",
-    "check": "node --check server.mjs && node --check admin-auth.mjs && node --check store.mjs && node --check composio.mjs && node --check public/app.js"
+    "check": "node --check server.mjs && node --check admin-auth.mjs && node --check store.mjs && node --check composio.mjs && node --check discovery.mjs && node --check session-requests.mjs && node --check public/app.js"
   },
   "dependencies": {
     "@composio/core": "0.18.1"

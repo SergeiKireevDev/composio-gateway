@@ -17,7 +17,7 @@
       <div class="sidebar-label">WORKSPACE</div>
       <nav>
         <button class="nav active" data-tab="tools">
-          ▦ <span>Tool permissions</span></button
+          ▦ <span>Tools & requests</span></button
         ><button class="nav" data-tab="members">
           ♙ <span>Members & sessions</span></button
         ><button class="nav" data-tab="settings">
@@ -34,7 +34,7 @@
       <header>
         <span
           >WORKSPACE <span class="slash">/</span>
-          <span id="breadcrumb">Tool permissions</span></span
+          <span id="breadcrumb">Tools & requests</span></span
         ><span class="badge">SELF-HOSTED</span>
       </header>
       <section id="login" class="login card">
@@ -67,8 +67,8 @@
           <div class="page-heading">
             <div>
               <span class="eyebrow">CONTROL WHAT YOUR AGENTS CAN DO</span>
-              <h1>Tool permissions</h1>
-              <p>Manage a shared policy for your members’ connected apps.</p>
+              <h1>Tools & requests</h1>
+              <p>Review the exact tools each member requests for a session.</p>
             </div>
             <button id="refresh" class="secondary">↻ Sync catalog</button>
           </div>
@@ -78,26 +78,32 @@
               ><small>Connected apps only</small>
             </article>
             <article>
-              <span>Enabled</span><strong id="enabled-count">0</strong
-              ><small>Available in new sessions</small>
-            </article>
-            <article>
-              <span>Disabled</span><strong id="disabled-count">0</strong
-              ><small>Excluded from sessions</small>
-            </article>
-            <article>
               <span>Connection</span
               ><strong id="connection" class="status-value">Not set up</strong
               ><small id="synced-at">Add your API key to begin</small>
             </article>
           </div>
           <div id="scan-status" class="notice" hidden></div>
+          <div class="card padded">
+            <h2>Session requests</h2>
+            <p>
+              Approve or reject each exact tool set. Approval grants one
+              session, not permanent access. Requests expire after 24 hours or a
+              catalog/key change.
+            </p>
+            <button id="refresh-requests" class="secondary">
+              Refresh requests
+            </button>
+            <div id="requests-list" aria-live="polite"></div>
+          </div>
           <div class="card catalog">
             <div class="catalog-heading">
               <h2>
                 Tool catalog <span id="result-count" class="pill">0</span>
               </h2>
-              <span class="hint">Permissions apply to all members</span>
+              <span class="hint"
+                >Read-only catalog · permissions are approved per session</span
+              >
             </div>
             <div class="filters">
               <input
@@ -108,22 +114,11 @@
               /><select id="catalog-member" aria-label="Filter by member">
                 <option value="">All active members</option></select
               ><select id="toolkit" aria-label="Filter by app">
-                <option value="">All apps</option></select
-              ><select id="filter" aria-label="Filter by permission">
-                <option value="all">All permissions</option>
-                <option value="enabled">Enabled</option>
-                <option value="disabled">Disabled</option>
+                <option value="">All apps</option>
               </select>
             </div>
             <div class="bulk">
               <span id="showing">No tools loaded</span>
-              <div>
-                <button id="enable-visible" class="subtle">
-                  Enable filtered</button
-                ><button id="disable-visible" class="subtle">
-                  Disable filtered
-                </button>
-              </div>
             </div>
             <div id="tools-list"></div>
             <div class="pagination">
@@ -131,17 +126,6 @@
               ><span id="page-number">Page 1</span
               ><button id="next" class="secondary">Next →</button>
             </div>
-          </div>
-          <div id="save-bar" class="save-bar" hidden>
-            <div>
-              <strong>Unsaved permission changes</strong
-              ><small
-                >Saving revokes existing sessions. Members can request a new
-                one.</small
-              >
-            </div>
-            <button id="discard" class="secondary">Discard</button
-            ><button id="save" class="primary">Save permissions</button>
           </div>
         </section>
         <section id="members-tab" class="tab" hidden>
@@ -244,11 +228,13 @@
               <dt>Lifetime</dt>
               <dd id="ttl">1 hour</dd>
               <dt>Tool policy</dt>
-              <dd>Shared across all members</dd>
+              <dd>Exact requested tools, approved per session</dd>
               <dt>Sandbox & proxy execution</dt>
               <dd>Disabled</dd>
               <dt>App OAuth</dt>
-              <dd>Available through Composio connection tools</dd>
+              <dd>
+                Available through an approved connection-management session
+              </dd>
             </dl>
           </div>
         </section>

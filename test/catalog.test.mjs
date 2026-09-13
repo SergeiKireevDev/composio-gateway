@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGateway } from "../server.mjs";
 import { createProvider } from "../composio.mjs";
+import { issueSession } from "../test-support/issue-session.mjs";
 
 const tool = (kit, name = "READ") => ({
   slug: `${kit.toUpperCase()}_${name}`,
@@ -161,16 +162,12 @@ test("union of active members is deduplicated and pagination is independent per 
   );
 });
 
-test("disconnect/reconnect preserves disabled policy including hidden tools", async (t) => {
+test("disconnect/reconnect preserves legacy disabled metadata but cannot grant permissions", async (t) => {
   const f = await setup(t);
   f.connections.set("alice", ["github"]);
   await f.member("alice");
   await f.configure();
-  assert.equal(
-    (await f.req("/api/admin/policy", "PUT", { disabled: ["GITHUB_READ"] }))
-      .status,
-    200,
-  );
+  f.app.store.set("disabled", ["GITHUB_READ"]);
   f.connections.set("alice", []);
   await f.refresh();
   assert.equal((await f.req("/api/admin/tools")).data.items.length, 0);
@@ -180,12 +177,12 @@ test("disconnect/reconnect preserves disabled policy including hidden tools", as
   assert.equal(
     (await f.req("/api/admin/policy", "PUT", { disabled: ["GITHUB_READ"] }))
       .status,
-    200,
+    410,
   );
   assert.equal(
     (await f.req("/api/admin/policy", "PUT", { disabled: ["UNKNOWN_TOOL"] }))
       .status,
-    400,
+    410,
   );
   f.connections.set("alice", ["github"]);
   await f.refresh();
@@ -228,17 +225,28 @@ test("new connection triggers a scoped refresh before issuing an executable sess
   await f.configure();
   const m = await f.member("alice");
   assert.equal(
-    (await f.req("/api/sessions", "POST", {}, m.token)).data.mode,
+    (await issueSession(f.req, m.token, [])).data.mode,
     "onboarding",
   );
   f.connections.set("alice", ["github"]);
-  assert.equal((await f.req("/api/sessions", "POST", {}, m.token)).status, 409);
+  assert.equal(
+    (await f.req("/api/sessions", "POST", { tools: ["GITHUB_READ"] }, m.token))
+      .status,
+    409,
+  );
   await f.app.waitForScan();
-  const denied = await f.req("/api/sessions", "POST", {}, m.token);
-  assert.equal(denied.status, 409);
-  assert.match(denied.data.error, /No enabled tools/);
-  await f.req("/api/admin/policy", "PUT", { disabled: [] });
-  assert.equal((await f.req("/api/sessions", "POST", {}, m.token)).status, 201);
+  const pending = await f.req(
+    "/api/sessions",
+    "POST",
+    { tools: ["GITHUB_READ"] },
+    m.token,
+  );
+  assert.equal(pending.status, 202);
+  assert.equal(pending.data.status, "pending");
+  assert.equal(
+    (await issueSession(f.req, m.token, ["GITHUB_READ"])).status,
+    201,
+  );
   assert.deepEqual(f.created.at(-1).config.toolkits, ["github"]);
   assert.ok(f.pages.every((p) => p.kit === "github"));
 });
@@ -322,7 +330,7 @@ test("new tools default disabled while saved permissions survive refresh, discon
   assert.deepEqual((await f.req("/api/admin/status")).data.disabled, [
     "GITHUB_READ",
   ]);
-  await f.req("/api/admin/policy", "PUT", { disabled: [] });
+  f.app.store.set("disabled", []);
   f.provider.page = async () => ({
     items: [tool("github"), tool("github", "WRITE")],
   });
