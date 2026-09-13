@@ -113,7 +113,7 @@ test("individual admin revocation aborts an in-flight MCP request", async (t) =>
   assert.equal(aborted, true);
 });
 
-test("member MCP authenticates, lists only session creation, and returns a usable session", async (t) => {
+test("member MCP authenticates, lists discovery and session creation, and returns a usable session", async (t) => {
   const f = await fixture(t);
   await f.setup();
   const m = await f.member();
@@ -125,7 +125,11 @@ test("member MCP authenticates, lists only session creation, and returns a usabl
   const list = await rpc("tools/list");
   assert.deepEqual(
     list.data.result.tools.map((t) => t.name),
-    ["GATEWAY_CREATE_SESSION"],
+    [
+      "COMPOSIO_SEARCH_TOOLS",
+      "COMPOSIO_GET_TOOL_SCHEMAS",
+      "GATEWAY_CREATE_SESSION",
+    ],
   );
   const created = await rpc("tools/call", {
     name: "GATEWAY_CREATE_SESSION",
@@ -233,6 +237,138 @@ test("member MCP honors tool policy, onboarding, notifications and session limit
   const limited = await f.req("/mcp", "POST", b, m.token);
   assert.equal(limited.data.result.isError, true);
   assert.match(limited.data.result.content[0].text, /Maximum 10/);
+});
+
+test("member discovery works with every tool disabled and never creates or forwards an execution session", async (t) => {
+  const f = await fixture(t);
+  await f.setup();
+  const m = await f.member();
+  await f.req("/api/admin/policy", "PUT", {
+    disabled: items.map((t) => t.slug),
+  });
+  f.provider.connectedToolkits = async () => ["github"];
+  const schemas = [];
+  f.provider.schema = async (key, slug) => {
+    schemas.push(slug);
+    return {
+      slug,
+      toolkit: { slug: "github" },
+      name: "Delete repo",
+      description: "Delete",
+      input_parameters: {
+        type: "object",
+        properties: { repo: { type: "string" } },
+      },
+      output_parameters: { type: "object" },
+      secret: key,
+    };
+  };
+  const call = (name, args) =>
+    f.req(
+      "/mcp",
+      "POST",
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name, arguments: args },
+      },
+      m.token,
+    );
+  const search = await call("COMPOSIO_SEARCH_TOOLS", {
+    query: "repository",
+    limit: 1,
+  });
+  assert.equal(search.status, 200);
+  assert.deepEqual(
+    search.data.result.structuredContent.tools.map((t) => t.slug),
+    ["GITHUB_DELETE_REPO"],
+  );
+  assert.equal(search.data.result.structuredContent.next_offset, null);
+  const schema = await call("COMPOSIO_GET_TOOL_SCHEMAS", {
+    tool_slugs: ["GITHUB_DELETE_REPO"],
+  });
+  assert.equal(
+    schema.data.result.structuredContent.tools[0].input_schema.type,
+    "object",
+  );
+  assert.equal(JSON.stringify(schema).includes("secret-project-key"), false);
+  for (const args of [
+    { tool_slugs: ["GMAIL_SEND_EMAIL"] },
+    { tool_slugs: ["GITHUB_DELETE_REPO", "UNKNOWN"] },
+    { tool_slugs: [] },
+  ])
+    assert.equal(
+      (await call("COMPOSIO_GET_TOOL_SCHEMAS", args)).data.result.isError,
+      true,
+    );
+  assert.deepEqual(schemas, ["GITHUB_DELETE_REPO"]);
+  assert.equal(
+    (await call("COMPOSIO_SEARCH_TOOLS", { limit: 101 })).data.result.isError,
+    true,
+  );
+  assert.equal(
+    (await call("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [] })).data.error.code,
+    -32602,
+  );
+  assert.equal(
+    (await call("GATEWAY_CREATE_SESSION", {})).data.result.isError,
+    true,
+  );
+  assert.equal(f.calls.create.length, 0);
+  assert.equal(f.calls.forward.length, 0);
+  assert.equal(
+    f.app.store.db.prepare("SELECT COUNT(*) AS n FROM sessions").get().n,
+    0,
+  );
+  f.provider.connectedToolkits = async () => [];
+  assert.equal(
+    (await call("COMPOSIO_SEARCH_TOOLS", {})).data.result.structuredContent
+      .total,
+    0,
+  );
+});
+
+test("member discovery suppresses schema results when the member is revoked during lookup", async (t) => {
+  const f = await fixture(t);
+  await f.setup();
+  const m = await f.member();
+  let entered, release;
+  const started = new Promise((r) => {
+    entered = r;
+  });
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  f.provider.schema = async () => {
+    entered();
+    await gate;
+    return {
+      slug: "GITHUB_DELETE_REPO",
+      toolkit: { slug: "github" },
+      input_parameters: { type: "object" },
+    };
+  };
+  const pending = f.req(
+    "/mcp",
+    "POST",
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "COMPOSIO_GET_TOOL_SCHEMAS",
+        arguments: { tool_slugs: ["GITHUB_DELETE_REPO"] },
+      },
+    },
+    m.token,
+  );
+  await started;
+  await f.req(`/api/admin/members/${m.id}/revoke`, "POST");
+  release();
+  const response = await pending;
+  assert.equal(response.data.result.isError, true);
+  assert.equal(response.data.result.structuredContent, undefined);
 });
 
 export async function fixture(t) {
