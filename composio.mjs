@@ -27,6 +27,18 @@ export function createProvider({
         throw new Error("Unexpected Composio catalog response.");
       return data;
     },
+    async schema(apiKey, slug, signal = AbortSignal.timeout(15000)) {
+      const res = await fetchImpl(
+        `https://backend.composio.dev/api/v3.1/tools/${encodeURIComponent(slug)}`,
+        {
+          headers: { "x-api-key": apiKey },
+          signal,
+          redirect: "error",
+        },
+      );
+      if (!res.ok) throw new Error("Composio schema request failed.");
+      return res.json();
+    },
     async connectedToolkits(apiKey, userId) {
       const c = makeClient(apiKey),
         slugs = new Set(),

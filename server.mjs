@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { openStore, token, hash } from "./store.mjs";
 import { createAdminAuthenticator } from "./admin-auth.mjs";
 import { createProvider } from "./composio.mjs";
+import { discoveryTools, discover } from "./discovery.mjs";
 const root = fileURLToPath(new URL(".", import.meta.url));
 const fail = (status, message) => Object.assign(new Error(message), { status });
 function textField(v, label, max = 200) {
@@ -579,7 +580,7 @@ export function createGateway({
         return;
       }
       if (path === "/mcp") {
-        // Member credentials expose only the local session-creation tool.
+        // Member credentials expose read-only discovery and session creation.
         // They never authorize forwarding or execution of upstream tools.
         if (
           db
@@ -621,13 +622,14 @@ export function createGateway({
               capabilities: { tools: {} },
               serverInfo: { name: "composio-gateway", version: "0.1.0" },
               instructions:
-                "Call GATEWAY_CREATE_SESSION, then connect using the returned MCP URL and session bearer token to access Composio tools.",
+                "Use COMPOSIO_SEARCH_TOOLS and COMPOSIO_GET_TOOL_SCHEMAS for read-only connected-app discovery without a session token. Call GATEWAY_CREATE_SESSION for execution access using the saved administrator policy.",
             });
           } else if (b.method === "ping") {
             reply({});
           } else if (b.method === "tools/list") {
             reply({
               tools: [
+                ...discoveryTools,
                 {
                   name: "GATEWAY_CREATE_SESSION",
                   description:
@@ -648,7 +650,47 @@ export function createGateway({
             });
           } else if (b.method === "tools/call") {
             const args = b.params?.arguments ?? {};
-            if (b.params?.name !== "GATEWAY_CREATE_SESSION") {
+            if (discoveryTools.some((t) => t.name === b.params?.name)) {
+              try {
+                const m = member(req),
+                  epoch = store.get("epoch", 0);
+                const apiKey = key();
+                const connected = new Set(
+                  await provider.connectedToolkits(apiKey, m.user_id),
+                );
+                const available = catalog().filter((t) =>
+                  connected.has(t.toolkit),
+                );
+                const result = await discover(
+                  b.params.name,
+                  args,
+                  available,
+                  provider,
+                  apiKey,
+                );
+                // Do not release metadata after credential rotation, revocation,
+                // or project/catalog changes while an upstream read was pending.
+                member(req);
+                if (store.get("epoch", 0) !== epoch)
+                  throw fail(409, "Catalog changed; retry discovery.");
+                reply({
+                  content: [{ type: "text", text: JSON.stringify(result) }],
+                  structuredContent: result,
+                });
+              } catch (e) {
+                reply({
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: e.status
+                        ? e.message
+                        : "Tool discovery failed. Refresh the catalog or try again later.",
+                    },
+                  ],
+                });
+              }
+            } else if (b.params?.name !== "GATEWAY_CREATE_SESSION") {
               error(-32602, "Unknown tool.");
             } else if (
               typeof args !== "object" ||

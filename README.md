@@ -52,9 +52,15 @@ The key is stored encrypted in the database, as with UI configuration. Removing 
 ### Through MCP
 
 Configure an HTTP MCP connection to `https://gateway.example.com/mcp` with
-`Authorization: Bearer <member-token>`. This authenticated connection exposes
-only **`GATEWAY_CREATE_SESSION`**. Call it with `{}` to obtain the same session
-connection details as the REST endpoint below.
+`Authorization: Bearer <member-token>`. This authenticated connection exposes:
+
+- **`COMPOSIO_SEARCH_TOOLS`**: `{"query":"repository","limit":20,"offset":0}` searches the synced connected-app catalog. Use an empty query to browse; follow `next_offset` for subsequent pages.
+- **`COMPOSIO_GET_TOOL_SCHEMAS`**: `{"tool_slugs":["GITHUB_GET_REPOSITORY_CONTENT"]}` reads Composio input/output metadata for up to 20 tools.
+- **`GATEWAY_CREATE_SESSION`**: call with `{}` to obtain the same execution-session connection details as REST below.
+
+Discovery needs **no gateway or upstream execution session**, works even when all tools are disabled, and never grants execution permission. Search is local keyword matching, not Composio's native semantic search; these member-endpoint schemas differ from the upstream meta-tool schemas exposed with a session token. Schema lookup uses Composio's read-only tool metadata API. Both are limited to the requesting member's currently connected apps and the last synced catalog. If an app/tool is missing, connect it and have the admin **Sync catalog**. Results are metadata, not authorization.
+
+The requested per-session tool approval workflow is not included in this change; execution sessions still use the saved admin policy.
 
 Use the returned `mcp.url` and session Authorization header for a separate MCP
 connection that accesses Composio tools. The member-authenticated connection
